@@ -2,6 +2,7 @@ package test
 
 import (
 	"testing"
+	"time"
 
 	"infer-router/internal/balancer"
 	"infer-router/internal/registry"
