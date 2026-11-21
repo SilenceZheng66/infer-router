@@ -1,0 +1,16 @@
+# 副本清单：base_url 不含 /v1，路由层原样透传 /v1/* 路径
+addr: ":8080"
+strategy: round_robin            # round_robin | least_queue
+health_interval_s: 5
+breaker:
+  fail_threshold: 3
+  cooldown_s: 15
+backends:
+  - name: vllm-a
+    base_url: http://127.0.0.1:8001
+    model: qwen2.5-1.5b
+    weight: 1
+  - name: vllm-b
+    base_url: http://127.0.0.1:8002
+    model: qwen2.5-1.5b
+    weight: 1
