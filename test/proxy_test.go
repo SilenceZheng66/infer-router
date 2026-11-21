@@ -60,7 +60,7 @@ func TestProxyMarksFailureOnUpstreamError(t *testing.T) {
 	}))
 	defer up.Close()
 
-	state := registry.NewState(registry.Backend{Name: "bad", BaseURL: up.URL}, 1, 60)
+	state := registry.NewState(registry.Backend{Name: "bad", BaseURL: up.URL}, 1, 60*time.Second)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
 

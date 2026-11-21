@@ -32,16 +32,17 @@ func NewState(b Backend, threshold int, cooldown time.Duration) *State {
 	return &State{Backend: b, healthy: true, threshold: threshold, cooldown: cooldown}
 }
 
+// Healthy 返回是否可接收流量：健康、未触发熔断，或熔断冷却期满（half-open 探测）。
 func (s *State) Healthy() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.healthy {
 		return false
 	}
-	if s.failures == 0 {
+	if s.failures < s.threshold {
 		return true
 	}
-	return time.Since(s.openedAt) >= s.cooldown // half-open 探测放行
+	return time.Since(s.openedAt) >= s.cooldown
 }
 
 func (s *State) SetHealthy(h bool) { s.mu.Lock(); s.healthy = h; s.mu.Unlock() }

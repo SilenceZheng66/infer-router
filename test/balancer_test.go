@@ -12,7 +12,7 @@ func makeStates(names []string) []*registry.State {
 	for _, n := range names {
 		out = append(out, registry.NewState(
 			registry.Backend{Name: n, BaseURL: "http://" + n, Model: "m"},
-			3, 15,
+			3, 15*time.Second,
 		))
 	}
 	return out
@@ -51,18 +51,18 @@ func TestLeastQueuePicksMinInFlight(t *testing.T) {
 }
 
 func TestBreakerOpensAndRecovers(t *testing.T) {
-	s := registry.NewState(registry.Backend{Name: "x"}, 2, 0)
+	s := registry.NewState(registry.Backend{Name: "x"}, 2, 50*time.Millisecond)
 	s.RecordFailure()
 	if !s.Healthy() {
 		t.Fatal("1 failure below threshold should stay healthy")
 	}
 	s.RecordFailure()
 	if s.Healthy() {
-		t.Fatal("threshold reached should be unhealthy")
+		t.Fatal("threshold reached should open breaker")
 	}
-	// cooldown=0 → half-open 立即放行
+	time.Sleep(60 * time.Millisecond)
 	if !s.Healthy() {
-		t.Fatal("cooldown elapsed should allow probe")
+		t.Fatal("cooldown elapsed should allow half-open probe")
 	}
 	s.RecordSuccess()
 	if !s.Healthy() {
