@@ -16,7 +16,8 @@ infer-router does one thing: **route OpenAI-compatible requests (including SSE s
   - **Model-aware routing**: candidate pool filtered by the request's `model` (backend.model accepts comma-separated lists and `*` wildcards); the affinity key is model-scoped, so switching models mid-session never crosses pools
   - **Bounded load** (α=1.25): when the preferred replica's in-flight count exceeds its cap, overflow goes to the next-best replica — stickiness and balance at the same time
   - **Sticky tracker**: sliding-window ratio of repeated session requests landing on the same replica, exported as `router_affinity_sticky_ratio`
-  - Session key: `X-Session-Id` header first, else the messages prefix (system + first user turn) — stable across turns
+  - **Hybrid prefix tree**: session-less requests are approximately matched on per-model radix trees keyed by the normalized, chunked hash chain of `messages`; on a hit (match ratio ≥ cache_threshold) the tree-recorded replica is reused with bounded load still applied, on a miss dispatch is deterministic over the matched prefix. A global node cap (`max_tree_size`) plus periodic LRU eviction bound memory. Conversations sharing a long prefix (e.g. the same system prompt) concentrate on the replica holding that prefix for better KV reuse — mock run with 30 shared-system conversations: tree mode 30/30 on one replica vs 16/14 spread in affinity-only mode
+  - Three-stage session resolution: `X-Session-Id` fast path → prefix-tree approximate match → deterministic prefix dispatch (session key still prefers the `X-Session-Id` header, else the messages prefix — stable across turns)
 - **Strategies**: `round_robin | least_queue | prefix_affinity`
 - **Health probing + breaker**: periodic probes evict dead replicas; request-level fail_threshold breaker with cooldown half-open probing; **error classification** — 5xx/connection errors count as breaker failures, 4xx do not (404+model lands in `router_model_mismatch_total`, surfacing serving-state drift between replica declaration and reality)
 - **Request-level failover**: on upstream 5xx/connection error with zero bytes written to the client, the router automatically retries once on the next-best replica by affinity order (never after SSE has started streaming); observable via `router_retries_total{from,to}`, disable with `retry.enabled=false`
@@ -90,6 +91,11 @@ breaker: { fail_threshold: 3, cooldown_s: 10 }
 affinity:
   alpha: 1.25                   # bounded-load spillover factor
   sticky_window: 16384          # raise for high concurrent-session counts
+  tree:                         # hybrid prefix tree (enabled by default)
+    max_tree_size: 65536        # global node cap, LRU eviction beyond it
+    eviction_interval_s: 60     # periodic eviction
+    cache_threshold: 0.5        # tree hit ratio (matched depth / chain length)
+    chunk_chars: 256            # normalization chunk granularity (runes)
 backends:
   - { name: vllm-a, base_url: "http://vllm-a.svc:8001", model: qwen2.5-1.5b, weight: 2 }
   - { name: vllm-b, base_url: "http://vllm-b.svc:8001", model: qwen2.5-1.5b, weight: 1 }

@@ -51,9 +51,25 @@ var ModelMismatch = prometheus.NewCounterVec(
 	[]string{"backend", "model"},
 )
 
+// 混合前缀树观测（M3）：命中率自证 + 按模型树规模。
+var PrefixMatchRatio = prometheus.NewGaugeFunc(
+	prometheus.GaugeOpts{Name: "router_prefix_match_ratio",
+		Help: "Ratio of hybrid prefix-tree lookups that matched a recorded prefix (recent window)"},
+	func() float64 { return PrefixMatchRatioFn() },
+)
+
+// PrefixMatchRatioFn 由 affinity 包注入（树未启用时恒 0）。
+var PrefixMatchRatioFn = func() float64 { return 0 }
+
+var PrefixTreeNodes = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{Name: "router_prefix_tree_nodes",
+		Help: "Hybrid prefix-tree node count per model"},
+	[]string{"model"},
+)
+
 // StickyRatioFn 由 affinity 包注入（避免 metrics -> affinity 反向依赖）。
 var StickyRatioFn = func() float64 { return 1.0 }
 
 func init() {
-	prometheus.MustRegister(ReqTotal, InFlight, AffinitySticky, AffinityAssign, AffinityOverloadFallback, ModelNoMatch, Retries, ModelMismatch)
+	prometheus.MustRegister(ReqTotal, InFlight, AffinitySticky, AffinityAssign, AffinityOverloadFallback, ModelNoMatch, Retries, ModelMismatch, PrefixMatchRatio, PrefixTreeNodes)
 }

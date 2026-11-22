@@ -16,7 +16,8 @@ infer-router 只做一件事：**把 OpenAI 兼容请求（含 SSE 流式）以�
   - **模型感知路由**：按请求 model 筛选候选池（backend.model 支持逗号分隔多模型与 `*` 通配）；会话亲和 key 含模型维度，同会话切模型不串池
   - **bounded load**（α=1.25）：亲和副本在途数超过上限时顺延次优副本，粘性与均衡兼得
   - **sticky tracker**：滑动窗口统计重复会话请求的同副本比例，暴露为 `router_affinity_sticky_ratio`
-  - 会话 key 优先取 `X-Session-Id` header，否则取 messages 前缀（system + 首条 user）——多轮对话该前缀不变
+  - **混合前缀树**：无会话 ID 的请求按 messages 归一化分块哈希链在按模型分棵的前缀树上近似匹配，命中（匹配比例 ≥ cache_threshold）沿用树记录副本并叠加 bounded load，未命中按"已匹配前缀"确定性派单；全局节点上限 `max_tree_size` + LRU 周期驱逐。共享长前缀（如同一 system）的会话集中到持有该前缀的副本以提升 KV 复用——mock 实测 30 个共享 system 会话：tree 模式 30/30 单副本集中，affinity-only 模式 16/14 摊开
+  - 会话解析三级：`X-Session-Id` 快路径 → 前缀树近似匹配 → 前缀确定性派单（会话 key 仍优先取 `X-Session-Id` header，否则取 messages 前缀——多轮对话该前缀不变）
 - **策略集**：`round_robin | least_queue | prefix_affinity`
 - **健康探测 + 熔断**：周期探活自动摘除死副本；请求级 fail_threshold 熔断 + 冷却半开探测；**错误分类**——5xx/连接错误计熔断失败，4xx 不计（404+model 记 `router_model_mismatch_total`，暴露副本声明与实际 serving 不符）
 - **请求级 failover**：上游 5xx/连接错误且响应尚未写给客户端时，按亲和次序自动换下一个副本重试一次（SSE 一旦开始流出即不重试）；`router_retries_total{from,to}` 可观测，`retry.enabled=false` 可关闭
@@ -90,6 +91,11 @@ breaker: { fail_threshold: 3, cooldown_s: 10 }
 affinity:
   alpha: 1.25                   # 超载顺延系数
   sticky_window: 16384          # 高并发会话数大时调大统计窗口
+  tree:                         # 混合前缀树（缺省开启）
+    max_tree_size: 65536        # 全局节点上限，超限 LRU 驱逐
+    eviction_interval_s: 60     # 周期驱逐
+    cache_threshold: 0.5        # 树命中判定比例（匹配深度/链长）
+    chunk_chars: 256            # messages 归一化分块粒度（rune）
 backends:
   - { name: vllm-a, base_url: "http://vllm-a.svc:8001", model: qwen2.5-1.5b, weight: 2 }
   - { name: vllm-b, base_url: "http://vllm-b.svc:8001", model: qwen2.5-1.5b, weight: 1 }

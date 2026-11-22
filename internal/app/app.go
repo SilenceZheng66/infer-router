@@ -30,6 +30,16 @@ type BreakerCfg struct {
 type AffinityCfg struct {
 	Alpha        float64 `yaml:"alpha"`         // bounded load 系数，cap = ceil(alpha × 平均在途)
 	StickyWindow int     `yaml:"sticky_window"` // 粘性统计窗口容量
+	Tree         TreeCfg `yaml:"tree"`          // 混合前缀树（M3）
+}
+
+// TreeCfg 混合前缀树配置（仅 prefix_affinity 生效，缺省开启）。
+type TreeCfg struct {
+	Enabled           *bool   `yaml:"enabled"`             // 缺省 true
+	MaxSize           int     `yaml:"max_tree_size"`       // 全局节点上限，缺省 65536
+	EvictionIntervalS float64 `yaml:"eviction_interval_s"` // LRU 驱逐周期，缺省 60
+	CacheThreshold    float64 `yaml:"cache_threshold"`     // 命中判定比例，缺省 0.5
+	ChunkChars        int     `yaml:"chunk_chars"`         // 归一化分块粒度（rune），缺省 256
 }
 
 // RetryCfg 请求级 failover 配置。指针字段区分"未配置"与显式 false，保证缺省值语义。
@@ -84,6 +94,18 @@ func applyDefaults(cfg *Config) {
 	if cfg.Retry.Max <= 0 {
 		cfg.Retry.Max = 1
 	}
+	if cfg.Affinity.Tree.MaxSize <= 0 {
+		cfg.Affinity.Tree.MaxSize = 65536
+	}
+	if cfg.Affinity.Tree.EvictionIntervalS <= 0 {
+		cfg.Affinity.Tree.EvictionIntervalS = 60
+	}
+	if cfg.Affinity.Tree.CacheThreshold <= 0 {
+		cfg.Affinity.Tree.CacheThreshold = 0.5
+	}
+	if cfg.Affinity.Tree.ChunkChars <= 0 {
+		cfg.Affinity.Tree.ChunkChars = 256
+	}
 }
 
 // resolvedRetry 把指针形态的 RetryCfg 解析为 proxy 层的具体配置（缺省全开、max=1）。
@@ -123,6 +145,12 @@ func Build(cfg *Config) (*Runtime, http.Handler) {
 	case "prefix_affinity":
 		picker = affinity.NewPicker(cfg.Affinity.Alpha, cfg.Affinity.StickyWindow)
 		metrics.StickyRatioFn = picker.StickyRatio
+		if boolVal(cfg.Affinity.Tree.Enabled, true) { // 混合前缀树（缺省开启）
+			tr := affinity.NewTree(cfg.Affinity.Tree.MaxSize)
+			tr.StartEviction(time.Duration(cfg.Affinity.Tree.EvictionIntervalS * float64(time.Second)))
+			picker.AttachTree(tr, cfg.Affinity.Tree.CacheThreshold)
+			metrics.PrefixMatchRatioFn = tr.MatchRatio
+		}
 		bal = &balancer.RoundRobin{} // key 不可提取时（如非 chat 请求）的兜底
 	default:
 		bal = &balancer.RoundRobin{}
@@ -139,11 +167,15 @@ func Handler(rt *Runtime) http.Handler {
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/statusz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		out := map[string]any{
 			"strategy": cfg.Strategy,
 			"backends": len(rt.Reg.All()),
 			"healthy":  len(rt.Reg.Healthy()),
-		})
+		}
+		if rt.Picker != nil && rt.Picker.TreeActive() {
+			out["prefix_tree_nodes"] = rt.Picker.Tree.Nodes()
+		}
+		_ = json.NewEncoder(w).Encode(out)
 	})
 	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
 		states := rt.Reg.Healthy()
@@ -156,7 +188,7 @@ func Handler(rt *Runtime) http.Handler {
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body)) // 兜底：非 chat 路径仍可转发
-			key, model, kerr := affinity.ParseRequest(r, body)
+			key, model, chain, kerr := affinity.ParseRequestChain(r, body, cfg.Affinity.Tree.ChunkChars)
 
 			candidates, ok := filterByModel(w, states, model)
 			if !ok {
@@ -166,11 +198,17 @@ func Handler(rt *Runtime) http.Handler {
 			var st *registry.State
 			var ranked []*registry.State
 			if kerr == nil {
-				st = rt.Picker.Pick(compositeKey(model, key), candidates)
+				ck := compositeKey(model, key)
+				if rt.Picker.TreeActive() && len(chain) > 0 {
+					// 混合前缀树：sid 快路径外的请求走 树命中 → 前缀派单 → 全链派单
+					st = rt.Picker.PickHybrid(model, ck, chain, candidates)
+				} else {
+					st = rt.Picker.Pick(ck, candidates)
+				}
 				if st != nil {
 					// failover 次序：bounded load 主选 + 加权 rendezvous 次序的其余副本
 					ranked = []*registry.State{st}
-					for _, s := range rt.Picker.Rank(compositeKey(model, key), candidates) {
+					for _, s := range rt.Picker.Rank(ck, candidates) {
 						if s.Name != st.Name {
 							ranked = append(ranked, s)
 						}

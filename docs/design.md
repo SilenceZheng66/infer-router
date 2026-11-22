@@ -50,6 +50,17 @@ cap_i = ceil(α × Σinflight / n)，α = 1.25
 - 会话亲和 key 为"模型 + 会话"复合 key：同一会话切换模型视为不同亲和目标，避免把请求钉在与该模型无关的副本上。
 - RR / least_queue 策略路径应用同一过滤语义。
 
+### 2.6 混合前缀树（v0.2.0）
+
+无状态 rendezvous 的会话 key 取"system + 首条 user"，同一前缀的会话确定性地散布到所有副本——**共享长前缀（同一 system）的 KV 在每个副本各存一份**。前缀树补上这一点：路由器维护按模型分棵的 radix 树，把"已有前缀的会话落在哪个副本"记录下来，后续同族请求沿用该副本。
+
+- **键**：messages 归一化（折叠空白、role+content 拼接）后按消息分块（chunk_chars rune/块）做链式哈希 `seg[i] = fmix64(fnv(chunk[i]) ⊕ seg[i-1])`。分块以消息为界，链段前缀稳定——多轮追加只延伸链段，既有段不变；局部改写只作废所在块及之后的段，之前的前缀仍命中。链段末位即整条前缀的指纹，派单键 O(1) 提取。
+- **三级解析**：`X-Session-Id` 快路径（树不参与）→ 前缀树近似匹配 → 前缀确定性派单。树查得最深已记录深度 d：匹配比例 d/len(chain) ≥ cache_threshold（默认 0.5）且命中副本在健康池内、未超 bounded-load 上限 → 沿用；否则按"已匹配前缀指纹"（d=0 时按全链指纹）rendezvous 派单——共享前缀的会话聚合到同一副本，全新会话仍均匀摊开。
+- **归属记录**：请求路径上每个节点 first-writer-wins 记录副本。深度命中沿最深已记录节点判定——他人写入的路径对本会话可见（共享前缀跨会话复用的关键），而叶子节点记录归当前对话所有，不会覆盖更浅段的既有归属。
+- **内存治理**：全局节点上限 max_tree_size（默认 65536，跨模型求和），超限即按逻辑时钟 LRU 驱逐最久未访问的叶子；被逐叶子的父节点保留为合法端点（backend 记录仍在），匹配自然退化到更浅前缀。驱逐周期 eviction_interval_s（默认 60s），另外每次写入超限立即触发。
+- **均衡叠加**：树命中副本若过载或已不在池，转入前缀派单序列（bounded load 语义不变），不会因亲和把副本压垮。
+- **mock 对照实测**（30 会话共享同一 system、双副本）：tree 模式 30/30 集中到单副本；affinity-only 模式 16/14 摊开。指标 `router_prefix_match_ratio`（近期树命中率）、`router_prefix_tree_nodes{model}`（树规模）。
+
 ## 3. 粘性观测：sticky tracker
 
 环形窗口（容量 sticky_window=4096）记录 `key → last replica`。每次 Pick 后统计：**重复出现的 key 中，本次副本 == 上次副本的比例**。首见 key 不计入分母（否则新会话流入会稀释指标）。暴露为 gauge `router_affinity_sticky_ratio`。
@@ -76,6 +87,8 @@ cap_i = ceil(α × Σinflight / n)，α = 1.25
 | `router_model_nomatch_total{model}` | counter | 无副本服务请求模型的拒绝计数 |
 | `router_model_mismatch_total{backend,model}` | counter | 副本声明服务该模型但上游 404 |
 | `router_retries_total{from,to}` | counter | 请求级 failover 重试计数 |
+| `router_prefix_match_ratio` | gauge | 混合前缀树近期命中率（仅统计走树的请求） |
+| `router_prefix_tree_nodes{model}` | gauge | 按模型前缀树节点数 |
 | `router_affinity_sticky_ratio` | gauge | 重复会话同副本比例 |
 | `/statusz` | JSON | strategy / backends / healthy 快照 |
 
