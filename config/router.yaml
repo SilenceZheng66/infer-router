@@ -1,10 +1,18 @@
+# infer-router 配置
 # 副本清单：base_url 不含 /v1，路由层原样透传 /v1/* 路径
 addr: ":8080"
-strategy: round_robin            # round_robin | least_queue
+# round_robin | least_queue | prefix_affinity
+#   prefix_affinity: 无状态 rendezvous 哈希 + bounded load。
+#   会话 key 优先取 X-Session-Id header，否则取 messages 前缀（system + 首条 user）——
+#   多轮对话中该前缀不变，因此整段对话稳定命中同一副本，vLLM prefix caching 得以复用。
+strategy: prefix_affinity
 health_interval_s: 5
 breaker:
   fail_threshold: 3
   cooldown_s: 15
+affinity:
+  alpha: 1.25          # 亲和副本在途上限 = ceil(alpha × 平均在途)；超限顺延次优副本
+  sticky_window: 4096  # 粘性率统计窗口（/metrics: router_affinity_sticky_ratio）
 backends:
   - name: vllm-a
     base_url: http://127.0.0.1:8001

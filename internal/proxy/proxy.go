@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -22,10 +24,24 @@ func (r *recorder) WriteHeader(code int) {
 
 // Serve 将请求透传到指定副本（支持 SSE：FlushInterval=-1 逐块 flush）。
 func Serve(w http.ResponseWriter, req *http.Request, state *registry.State) {
+	serve(w, req, state, nil)
+}
+
+// ServeWithBody 在亲和路由下使用：请求体已被上游读取（用于提取 session key），
+// 用重放的 body 构造转发请求。body 为 nil 时退化为原始 req。
+func ServeWithBody(w http.ResponseWriter, req *http.Request, state *registry.State, body []byte) {
+	serve(w, req, state, body)
+}
+
+func serve(w http.ResponseWriter, req *http.Request, state *registry.State, body []byte) {
 	target, err := url.Parse(state.BaseURL)
 	if err != nil {
 		http.Error(w, "bad backend url", http.StatusBadGateway)
 		return
+	}
+	if body != nil {
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		req.ContentLength = int64(len(body))
 	}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
