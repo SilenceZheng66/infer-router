@@ -216,6 +216,15 @@ gate "S3-kill-midload-zero-fail" "$("$PY" -c "
 s='${OK3}'; print(1 if '/' in s and s.split('/')[0]==s.split('/')[1] else 0)" 2>/dev/null || echo 0)" \
   "ok=$OK3 retries_cum=$RETRY3"
 
+# --- S3 后恢复 vllm-b（探针自动加回，S4/S5 依赖双副本在线）---
+say "=== S3 后恢复 vllm-b（探针自动加回）==="
+if [ "$M2_KIND" = "lora" ]; then
+  start_vllm "$R/vllm-b.pid" 8002 "$UTIL_B" 8192 "$MODEL_PATH" --enable-lora --lora-modules "qwen15b-activity=$ADAPTER" --max-lora-rank 16
+else
+  start_vllm "$R/vllm-b.pid" 8002 "$UTIL_B" 8192 "$MODEL_PATH"
+fi
+wait_ready "$B"; sleep 8; say "vllm-b 已恢复，探针周期内应自动加回"
+
 # ================================================================ S4 异构 KV 分流
 say "=== S4 异构 KV 分流（直灌 vllm-a → 高水位 → top-k 改派）==="; mark PH_S4
 $PY "$LOADER" "http://$A" s4_flood 120 4 8 f1 0 > "$R/s4_flood.json" 2>&1 &
