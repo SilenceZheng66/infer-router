@@ -57,7 +57,8 @@ cap_i = ceil(α × Σinflight / n)，α = 1.25
 ## 4. 健康与降级
 
 - 周期探活（health_interval_s=5）：`GET {base_url}/v1/models`（OpenAI 兼容端点，vLLM/SGLang 均原生提供），连续失败摘除，恢复自动加回。
-- 请求级熔断：连续 fail_threshold 次失败打开熔断，cooldown_s 后半开放一个探测请求。
+- 请求级熔断：连续 fail_threshold 次失败打开熔断，cooldown_s 后半开放一个探测请求。失败计数按错误分类：**5xx / 连接错误计失败；4xx 不计**（客户端/配置问题不推动熔断），其中"副本声明服务该模型但上游 404"单独记 `router_model_mismatch_total{backend,model}`。
+- 请求级 failover（v0.2.0）：传输层（retryRoundTripper）在 5xx/连接错误、且响应尚未写给客户端时，按加权 rendezvous 次序换下一个副本重发一次（`retry.enabled=false` 关闭）。SSE 一旦开始流出即不再重试——响应头到达客户端后，body 复制期间的一切失败走 ErrorHandler 原样回错并计入实际服务副本。重试计数 `router_retries_total{from,to}`。
 - 实测降级：kill 一个 vLLM → probe 5s 内摘除 → 后续请求 100% 落到存活副本（30/30），`/statusz` 显示 healthy 1/2。副本恢复后 probe 自动加回。
 
 ## 5. 转发层
@@ -73,6 +74,8 @@ cap_i = ceil(α × Σinflight / n)，α = 1.25
 | `router_affinity_assign_total{backend}` | counter | 亲和指派分布（负载均衡度） |
 | `router_affinity_overload_fallback_total` | counter | bounded load 顺延次数 |
 | `router_model_nomatch_total{model}` | counter | 无副本服务请求模型的拒绝计数 |
+| `router_model_mismatch_total{backend,model}` | counter | 副本声明服务该模型但上游 404 |
+| `router_retries_total{from,to}` | counter | 请求级 failover 重试计数 |
 | `router_affinity_sticky_ratio` | gauge | 重复会话同副本比例 |
 | `/statusz` | JSON | strategy / backends / healthy 快照 |
 

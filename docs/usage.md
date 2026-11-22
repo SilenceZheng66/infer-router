@@ -25,6 +25,11 @@ breaker:
 affinity:                        # 仅 prefix_affinity 生效
   alpha: 1.25                    # bounded load 系数：cap = ceil(alpha × 平均在途)
   sticky_window: 4096            # 粘性统计环形窗口容量
+retry:                           # 请求级 failover（缺省开启，重试一次）
+  enabled: true                  # false = 5xx 直接透传客户端
+  max: 1                         # 额外重试次数
+  retry_on_5xx: true
+  retry_on_connect_error: true
 backends:
   - name: vllm-a
     base_url: http://127.0.0.1:8001   # 不含 /v1，路由层原样透传 /v1/* 路径
@@ -117,6 +122,8 @@ python tools/load_test.py http://127.0.0.1:8080 degraded 10 3 5 e1 0.2
   - 粘性率：`router_affinity_sticky_ratio`
   - 超限顺延：`rate(router_affinity_overload_fallback_total[1m])`
   - 模型路由错误：`rate(router_model_nomatch_total[1m]) > 0` → 检查请求 model 拼写与 backends 的 model 声明
+  - 模型声明不符：`rate(router_model_mismatch_total[1m]) > 0` → 副本实际 serving 与配置声明漂移
+  - 重试率：`rate(router_retries_total[1m])` 持续偏高 → 有副本半病态（探活未到阈值但请求失败），检查该副本 GPU/进程状态
 - `/statusz` 适合接入存活探针与发布检查。
 
 ## 7. 生产部署检查清单

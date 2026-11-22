@@ -32,12 +32,28 @@ type AffinityCfg struct {
 	StickyWindow int     `yaml:"sticky_window"` // 粘性统计窗口容量
 }
 
+// RetryCfg 请求级 failover 配置。指针字段区分"未配置"与显式 false，保证缺省值语义。
+type RetryCfg struct {
+	Enabled             *bool `yaml:"enabled"`                // 缺省 true
+	Max                 int   `yaml:"max"`                    // 额外重试次数，缺省 1
+	RetryOn5xx          *bool `yaml:"retry_on_5xx"`           // 缺省 true
+	RetryOnConnectError *bool `yaml:"retry_on_connect_error"` // 缺省 true
+}
+
+func boolVal(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
 type Config struct {
 	Addr              string             `yaml:"addr"`
 	Strategy          string             `yaml:"strategy"`
 	HealthIntervalSec int                `yaml:"health_interval_s"`
 	Breaker           BreakerCfg         `yaml:"breaker"`
 	Affinity          AffinityCfg        `yaml:"affinity"`
+	Retry             RetryCfg           `yaml:"retry"`
 	Backends          []registry.Backend `yaml:"backends"`
 }
 
@@ -65,6 +81,19 @@ func applyDefaults(cfg *Config) {
 	if cfg.Breaker.CooldownSec <= 0 {
 		cfg.Breaker.CooldownSec = 15
 	}
+	if cfg.Retry.Max <= 0 {
+		cfg.Retry.Max = 1
+	}
+}
+
+// resolvedRetry 把指针形态的 RetryCfg 解析为 proxy 层的具体配置（缺省全开、max=1）。
+func (c *Config) resolvedRetry() proxy.RetryConfig {
+	return proxy.RetryConfig{
+		Enabled:             boolVal(c.Retry.Enabled, true),
+		Max:                 c.Retry.Max,
+		RetryOn5xx:          boolVal(c.Retry.RetryOn5xx, true),
+		RetryOnConnectError: boolVal(c.Retry.RetryOnConnectError, true),
+	}
 }
 
 // Runtime 持有路由运行态依赖（registry、策略选择器）。
@@ -73,10 +102,13 @@ type Runtime struct {
 	Reg    *registry.Registry
 	Bal    balancer.Balancer
 	Picker *affinity.Picker // 仅 prefix_affinity 策略非 nil
+	Retry  proxy.RetryConfig
 }
 
 // Build 按策略装配 Runtime 与 HTTP handler。
+// 无论配置来自 LoadConfig 还是直接构造（集成测试），这里统一补齐默认值（幂等）。
 func Build(cfg *Config) (*Runtime, http.Handler) {
+	applyDefaults(cfg)
 	reg := registry.New(
 		cfg.Backends,
 		cfg.Breaker.FailThreshold,
@@ -96,7 +128,7 @@ func Build(cfg *Config) (*Runtime, http.Handler) {
 		bal = &balancer.RoundRobin{}
 	}
 
-	rt := &Runtime{Cfg: cfg, Reg: reg, Bal: bal, Picker: picker}
+	rt := &Runtime{Cfg: cfg, Reg: reg, Bal: bal, Picker: picker, Retry: cfg.resolvedRetry()}
 	return rt, Handler(rt)
 }
 
@@ -132,20 +164,31 @@ func Handler(rt *Runtime) http.Handler {
 			}
 
 			var st *registry.State
+			var ranked []*registry.State
 			if kerr == nil {
 				st = rt.Picker.Pick(compositeKey(model, key), candidates)
+				if st != nil {
+					// failover 次序：bounded load 主选 + 加权 rendezvous 次序的其余副本
+					ranked = []*registry.State{st}
+					for _, s := range rt.Picker.Rank(compositeKey(model, key), candidates) {
+						if s.Name != st.Name {
+							ranked = append(ranked, s)
+						}
+					}
+				}
 			} else {
 				st = rt.Bal.Pick(candidates) // key 不可提取：退化为 RR
+				ranked = singleOrEmpty(st)
 			}
 			if st == nil {
 				http.Error(w, `{"error":{"message":"no healthy backend"}}`, http.StatusBadGateway)
 				return
 			}
-			proxy.ServeWithBody(w, r, st, body)
+			proxy.ServeWithFailover(w, r, ranked, body, model, rt.Retry)
 			return
 		}
 
-		// RR / least_queue 路径：同样按 model 筛池
+		// RR / least_queue 路径：同样按 model 筛池（重试仅限亲和路径，RR 次序无"次优"语义）
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		_, model, _ := affinity.ParseRequest(r, body)
@@ -161,6 +204,13 @@ func Handler(rt *Runtime) http.Handler {
 		proxy.Serve(w, r, st)
 	})
 	return mux
+}
+
+func singleOrEmpty(st *registry.State) []*registry.State {
+	if st == nil {
+		return nil
+	}
+	return []*registry.State{st}
 }
 
 // filterByModel 按请求 model 筛选健康副本；model 为空放行全池。

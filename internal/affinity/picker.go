@@ -120,6 +120,31 @@ func NewPicker(alpha float64, stickyWindow int) *Picker {
 	return &Picker{Alpha: alpha, track: newTracker(stickyWindow)}
 }
 
+// Rank 返回 key 对候选副本的加权 rendezvous 完整排序（不做 bounded load）。
+// 供请求级 failover 取"主选之后的次优序列"。
+func (p *Picker) Rank(key string, candidates []*registry.State) []*registry.State {
+	if len(candidates) == 0 {
+		return nil
+	}
+	nodes := make([]string, len(candidates))
+	byName := make(map[string]*registry.State, len(candidates))
+	weights := make(map[string]int, len(candidates))
+	for i, s := range candidates {
+		nodes[i] = s.Name
+		byName[s.Name] = s
+		w := s.Weight
+		if w < 1 {
+			w = 1
+		}
+		weights[s.Name] = w
+	}
+	out := make([]*registry.State, 0, len(candidates))
+	for _, name := range WeightedSort(key, nodes, weights) {
+		out = append(out, byName[name])
+	}
+	return out
+}
+
 // Pick 选出 key 的亲和副本；亲和目标过载时按加权 rendezvous 次序顺延到首个未过载副本。
 // 全员过载（极少见）时退化为全局最小在途，保证不饿死。
 // 负载上限按权重分摊：cap_i = ceil(α × Σinflight × w_i / Σw)，等权时退化为 α × 平均在途。

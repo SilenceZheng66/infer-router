@@ -35,6 +35,8 @@ type Engine struct {
 	latency time.Duration
 	kvUsage atomic.Value // float64
 
+	abortAfter atomic.Int64 // >0 时 chat 响应写出后强制断开连接（模拟流式中途失败）
+
 	requests atomic.Int64
 	lastBody atomic.Value // string，最后一次 chat 请求体（调试/断言用）
 }
@@ -86,6 +88,9 @@ func (e *Engine) SetStatusSeq(seq []int) {
 // SetKVUsage 设置 /metrics 暴露的 KV 使用率（KV 感知路由场景用）。
 func (e *Engine) SetKVUsage(v float64) { e.kvUsage.Store(v) }
 
+// SetAbortAfter 设置 chat 响应写出后强制断开（模拟 SSE 流式中途失败）；0 关闭。
+func (e *Engine) SetAbortAfter(n int64) { e.abortAfter.Store(n) }
+
 func (e *Engine) handleModels(w http.ResponseWriter, _ *http.Request) {
 	var sb strings.Builder
 	for _, m := range e.models {
@@ -117,8 +122,18 @@ func (e *Engine) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	code := e.nextStatus()
 	if code != http.StatusOK {
-		http.Error(w, `{"error":{"message":"mock upstream failure"}}`, code)
+		http.Error(w, fmt.Sprintf(`{"error":{"message":"mock upstream failure at %s"}}`, e.Name), code)
 		return
+	}
+	if n := e.abortAfter.Load(); n > 0 {
+		// 先写出一部分响应并 flush（响应头已发出），随后强制断开——
+		// 用于验证"流式开始后不再 failover"
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprint(w, "data: {\"partial\":true}\n\n")
+		flusher.Flush()
+		time.Sleep(10 * time.Millisecond)
+		panic(http.ErrAbortHandler)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"id":"mock-1","object":"chat.completion","model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":"%s-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`, e.models[0], e.Name)

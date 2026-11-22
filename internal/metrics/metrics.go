@@ -37,9 +37,23 @@ var ModelNoMatch = prometheus.NewCounterVec(
 	[]string{"model"},
 )
 
+// 请求级 failover 观测：按 (原副本, 重试副本) 维度的重试计数。
+var Retries = prometheus.NewCounterVec(
+	prometheus.CounterOpts{Name: "router_retries_total",
+		Help: "Request-level failover attempts from one backend to another"},
+	[]string{"from", "to"},
+)
+
+// 模型声明不符观测：副本声明服务该模型但上游返回 404（声明与实际 serving 不符）。
+var ModelMismatch = prometheus.NewCounterVec(
+	prometheus.CounterOpts{Name: "router_model_mismatch_total",
+		Help: "Upstream 404s on requests whose model the backend claims to serve"},
+	[]string{"backend", "model"},
+)
+
 // StickyRatioFn 由 affinity 包注入（避免 metrics -> affinity 反向依赖）。
 var StickyRatioFn = func() float64 { return 1.0 }
 
 func init() {
-	prometheus.MustRegister(ReqTotal, InFlight, AffinitySticky, AffinityAssign, AffinityOverloadFallback, ModelNoMatch)
+	prometheus.MustRegister(ReqTotal, InFlight, AffinitySticky, AffinityAssign, AffinityOverloadFallback, ModelNoMatch, Retries, ModelMismatch)
 }
