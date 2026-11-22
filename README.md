@@ -1,10 +1,8 @@
 # infer-router
 
-部署在 N 个 vLLM / SGLang 副本前的**引擎中立轻量状态感知路由层**（Go，单二进制，无外部依赖）。
+部署在 N 个 vLLM / SGLang 副本前的**引擎中立轻量状态感知路由层**（Go，单静态二进制，无外部依赖）。与 [`llm-inference-lab`](https://github.com/SilenceZheng66/llm-inference-lab)（推理服务全链路参考实现）配合使用，也可独立替换现有链路中的裸轮询 LB / 重型网关路由环节。
 
-姊妹项目 [`llm-inference-lab`](https://github.com/SilenceZheng66/llm-inference-lab) 是推理服务全链路参考实现，本项目把其中"副本路由层"抽出来，做成可直接替换裸轮询 LB / 重型网关的独立组件。
-
-## 为什么需要它
+## 解决的问题
 
 多副本 vLLM 的 Prefix Cache 是**副本本地**的：同一会话的请求被轮询到不同副本时，副本各自重建 KV 前缀，既浪费算力（重复 prefill）又抬高 TTFT。重型网关功能全但部署重；裸轮询 LB 完全不感知这个结构。
 
@@ -35,7 +33,7 @@ infer-router 只做一件事：**把 OpenAI 兼容请求（含 SSE 流式）以�
 - bounded load 在途超限 fallback 22-53 次（α=1.25 的设计行为）
 - **降级演练**：kill 一个 vLLM → 健康探针自动摘除 → 30/30 请求全部落到存活副本，零失败
 
-> 口径说明：命中率为副本 `vllm:prefix_cache_{queries,hits}_total` 计数器差值比；~67% 的绝对值受副本 KV 容量 LRU 驱逐限制（≈10 万 token/副本），路由收益叠加在容量约束之上。完整实验记录（含三轮无效对照的返工过程）见仓库 `docs/design.md` 与姊妹项目 lab-notes。
+> 注：命中率为副本 `vllm:prefix_cache_{queries,hits}_total` 计数器差值比；~67% 的绝对值受副本 KV 容量 LRU 驱逐限制（≈10 万 token/副本），路由收益叠加在容量约束之上——副本 KV 容量越大、会话前缀越长，粘性路由的边际收益越大。实验复现步骤见 `docs/usage.md`。
 
 ## 快速开始
 
@@ -68,6 +66,34 @@ backends:
   - { name: vllm-a, base_url: "http://127.0.0.1:8001", model: qwen2.5-1.5b, weight: 1 }
   - { name: vllm-b, base_url: "http://127.0.0.1:8002", model: qwen2.5-1.5b, weight: 1 }
 ```
+
+### 本地最小启动（单副本冒烟）
+
+```bash
+# 一个 vLLM 副本即可验证路由与透传
+vllm serve /path/qwen2.5-1.5b --served-model-name qwen2.5-1.5b --port 8001 --gpu-memory-utilization 0.85 &
+./infer-router -config config/router.yaml   # backends 只留 vllm-a 一条
+curl localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"qwen2.5-1.5b","messages":[{"role":"user","content":"hi"}]}'
+```
+
+### 生产推荐配置
+
+```yaml
+addr: ":8080"
+strategy: prefix_affinity
+health_interval_s: 3            # 更快的故障摘除
+breaker: { fail_threshold: 3, cooldown_s: 10 }
+affinity:
+  alpha: 1.25                   # 副本性能异构时对慢副本单独调低权重
+  sticky_window: 16384          # 高并发会话数大时调大统计窗口
+backends:
+  - { name: vllm-a, base_url: "http://vllm-a.svc:8001", model: qwen2.5-1.5b, weight: 2 }
+  - { name: vllm-b, base_url: "http://vllm-b.svc:8001", model: qwen2.5-1.5b, weight: 1 }
+  - { name: vllm-c, base_url: "http://vllm-c.svc:8001", model: qwen2.5-7b,   weight: 1 }
+```
+
+部署要点：路由层与副本同机/同可用区部署（探活走内网）；systemd 或 Kubernetes 以静态二进制/镜像托管，资源占用约 1 vCPU / 64MB；Prometheus 抓取 `:8080/metrics` 监控 `router_affinity_sticky_ratio`（<0.9 检查会话 key 约定）与 `router_affinity_overload_fallback_total` 持续增长（调大 alpha 或扩容）；客户端统一携带 `X-Session-Id`。
 
 ## 压测工具
 
@@ -103,4 +129,4 @@ client ──► :8080 mux
 go test ./...        # 单测：rendezvous 一致性、bounded load 上限、sticky 统计、RR/least_queue、SSE 透传
 ```
 
-> 诚实口径：学习/作品集项目，性能结论仅来自免费算力环境的实测对比，不声明生产 SLA。MIT License。
+MIT License.

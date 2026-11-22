@@ -105,7 +105,16 @@ python tools/load_test.py http://127.0.0.1:8080 degraded 10 3 5 e1 0.2
   - 超限顺延：`rate(router_affinity_overload_fallback_total[1m])`
 - `/statusz` 适合接入存活探针与发布检查。
 
-## 7. 常见问题
+## 7. 生产部署检查清单
+
+- [ ] 路由层与副本同可用区，探活走内网（`health_interval_s: 3`）
+- [ ] 客户端统一携带 `X-Session-Id`（比 messages 前缀提取更稳定，且省一次 body 解析）
+- [ ] Prometheus 抓取 `:8080/metrics`：`router_affinity_sticky_ratio < 0.9` 告警（检查会话 key 约定）；`router_affinity_overload_fallback_total` 持续增长 → 调大 `alpha` 或扩副本
+- [ ] 副本 KV 容量核算：`gpu-memory-utilization × 显存 - 模型权重` 折算 token 容量，会话前缀总需求超容量时 LRU 驱逐会稀释粘性收益（见 README 实测数据）
+- [ ] systemd/Kubernetes 托管静态二进制（约 1 vCPU / 64MB），配 liveness probe 打 `/statusz`
+- [ ] 滚动更新副本时 rendezvous 只迁移 1/n 会话，无需路由层重启
+
+## 8. 常见问题
 
 - **副本启动后 statusz 一直 healthy 0**：检查 `base_url` 是否含 `/v1`（不应含）；探活用的是 `{base_url}/health`。
 - **SSE 客户端收不到流**：确认客户端未开响应缓冲；路由层 `FlushInterval=-1` 已逐块转发。

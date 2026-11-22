@@ -1,10 +1,8 @@
 # infer-router
 
-A **engine-neutral, state-aware routing layer** (Go, single static binary, zero external dependencies) that sits in front of N vLLM / SGLang replicas.
+A **engine-neutral, state-aware routing layer** (Go, single static binary, zero external dependencies) that sits in front of N vLLM / SGLang replicas. Works alongside [`llm-inference-lab`](https://github.com/SilenceZheng66/llm-inference-lab) (a full-stack reference implementation) or standalone, replacing a bare round-robin LB or the routing tier of a heavyweight gateway.
 
-The sibling project [`llm-inference-lab`](https://github.com/SilenceZheng66/llm-inference-lab) is a full-stack reference implementation of an inference service; this repo extracts its "replica routing layer" into a standalone component that can directly replace a bare round-robin LB or a heavyweight gateway.
-
-## Why it exists
+## Problem
 
 vLLM Prefix Cache is **local to each replica**: when consecutive turns of the same session are round-robined across replicas, every replica re-prefills the same KV prefix — wasted compute and higher TTFT. Heavyweight gateways do everything but are heavy to deploy; a bare LB is completely unaware of this structure.
 
@@ -35,7 +33,7 @@ Incremental-conversation load (40 sessions × 6 turns; each turn appends a ~250-
 - Bounded-load overflow fallbacks: 22-53 (expected behavior of α=1.25)
 - **Failover drill**: kill one vLLM → health probe evicts it → 30/30 requests succeed on the surviving replica, zero failures
 
-> Caveat: hit rates are delta ratios of replica `vllm:prefix_cache_{queries,hits}_total` counters; the ~67% absolute value is capped by per-replica KV-capacity LRU eviction (~100k tokens/replica) — the routing benefit stacks on top of that constraint. The full experiment log (including three rounds of invalid controls and how they were fixed) is in `docs/design.md`.
+> Note: hit rates are delta ratios of replica `vllm:prefix_cache_{queries,hits}_total` counters; the ~67% absolute value is capped by per-replica KV-capacity LRU eviction (~100k tokens/replica) — the routing benefit stacks on top of that constraint. The larger the replica KV capacity and the longer the session prefixes, the greater the marginal value of sticky routing. Reproduction steps in `docs/usage.md`.
 
 ## Quick start
 
@@ -68,6 +66,34 @@ backends:
   - { name: vllm-a, base_url: "http://127.0.0.1:8001", model: qwen2.5-1.5b, weight: 1 }
   - { name: vllm-b, base_url: "http://127.0.0.1:8002", model: qwen2.5-1.5b, weight: 1 }
 ```
+
+### Minimal local setup (single-replica smoke test)
+
+```bash
+# One vLLM replica is enough to verify routing and pass-through
+vllm serve /path/qwen2.5-1.5b --served-model-name qwen2.5-1.5b --port 8001 --gpu-memory-utilization 0.85 &
+./infer-router -config config/router.yaml   # keep only the vllm-a backend entry
+curl localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"qwen2.5-1.5b","messages":[{"role":"user","content":"hi"}]}'
+```
+
+### Production-recommended configuration
+
+```yaml
+addr: ":8080"
+strategy: prefix_affinity
+health_interval_s: 3            # faster failure eviction
+breaker: { fail_threshold: 3, cooldown_s: 10 }
+affinity:
+  alpha: 1.25                   # lower the weight of heterogeneous/slow replicas individually
+  sticky_window: 16384          # raise for high concurrent-session counts
+backends:
+  - { name: vllm-a, base_url: "http://vllm-a.svc:8001", model: qwen2.5-1.5b, weight: 2 }
+  - { name: vllm-b, base_url: "http://vllm-b.svc:8001", model: qwen2.5-1.5b, weight: 1 }
+  - { name: vllm-c, base_url: "http://vllm-c.svc:8001", model: qwen2.5-7b,   weight: 1 }
+```
+
+Deployment notes: run the router in the same host/zone as the replicas (probes stay on the internal network); host the static binary or image via systemd/Kubernetes (~1 vCPU / 64MB); let Prometheus scrape `:8080/metrics` and watch `router_affinity_sticky_ratio` (<0.9 → check the session-key contract) and sustained growth of `router_affinity_overload_fallback_total` (raise alpha or add replicas); have clients consistently send `X-Session-Id`.
 
 ## Load-test tools
 
@@ -103,4 +129,4 @@ client ──► :8080 mux
 go test ./...        # rendezvous consistency, bounded-load cap, sticky stats, RR/least_queue, SSE pass-through
 ```
 
-> Honest scope: a learning/portfolio project; performance numbers come only from free-tier GPU experiments, no production SLA claims. MIT License.
+MIT License.
