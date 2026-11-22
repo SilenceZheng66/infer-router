@@ -128,6 +128,25 @@ python tools/load_test.py http://127.0.0.1:8080 degraded 10 3 5 e1 0.2
 # 恢复：重新启动副本 B，probe 自动加回
 ```
 
+### 5.4 GPU 五场景回归（scripts/gpu_regression.sh）
+
+`scripts/gpu_regression.sh` 是面向真实 vLLM 副本的端到端回归 runbook，一条命令跑完五个场景并自动落盘门禁结果：
+
+| 场景 | 做法 | 门禁 |
+| --- | --- | --- |
+| S1 标准负载门禁 | 40×6 递增对话，先同步后 jitter | sticky≥0.95；vLLM `prefix_cache` 计数差值命中率≥67.3% |
+| S2 双模型混池零串池 | 副本 B 声明 base+LoRA 双模型（自动探测 adapter），20 发跨池请求 | 请求全部落 B、A 增量=0、`router_model_mismatch_total` 不增；未声明模型→502 |
+| S3 压测中途 kill 副本 | 压测进行到 t+20s 时 TERM 副本 B | 客户端 0 失败（请求级 failover），重试计数如实记录 |
+| S4 异构 KV 分流 | 直灌副本 A 至 `gpu_cache_usage_perc≥0.9`，再发长前缀会话 | `router_kv_steered_total≥1`，改派目标增量 > 被灌副本 |
+| S5 运行中扩缩副本 | 管理 API add/remove + SIGHUP 热更 | backends/healthy 数值即时变化且路由进程 PID 不变 |
+
+```bash
+# 前置：GPU 机器上已装 vLLM，模型权重缓存在 $MODEL_PATH，路由二进制与工具在 $WS/bundle
+bash scripts/gpu_regression.sh   # 结果与 run.log 落在 $WS/results，门禁汇总在 summary.txt
+```
+
+环境变量可覆盖：`WS`（工作区）、`MODEL_PATH`（权重路径）、`MODEL_DECL`（对路由层声明的模型名）、`BIN`（路由二进制）。脚本自带阶段 marker（`PH_S0`…`PH_UPLOAD`）与失败 marker（`BOOT_FAIL`/`BUILD_FAIL`），便于无人值守运行时观测进度；结果文件可逐个经 HTTP POST 回传（见脚本 `upload_one`）。
+
 ## 6. 指标接入
 
 - Prometheus scrape `:8080/metrics`；Grafana 常用查询：
