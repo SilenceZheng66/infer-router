@@ -142,6 +142,7 @@ gate "S1b-jitter-hit>=67.3%" "$("$PY" -c "print(1 if float('${HIT:-0%}'.rstrip('
 # ================================================================ S2 双模型零串池
 say "=== S2 双模型混池零串池 ==="; mark PH_S2
 ADAPTER=$(find /mnt/workspace/runs/sft-activity -name adapter_model.safetensors 2>/dev/null | head -1)
+[ -n "$ADAPTER" ] && ADAPTER=$(dirname "$ADAPTER")   # vLLM --lora-modules 需要 adapter 目录（含 adapter_config.json）
 M2_KIND=""; M2_MODEL=""; EXTRA_BACKEND=""
 if [ -n "$ADAPTER" ]; then
   M2_KIND="lora"; M2_MODEL="qwen15b-activity"
