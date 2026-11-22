@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -11,8 +12,22 @@ import (
 type Backend struct {
 	Name    string `yaml:"name"`
 	BaseURL string `yaml:"base_url"` // 不含 /v1
-	Model   string `yaml:"model"`
-	Weight  int    `yaml:"weight"`
+	Model   string `yaml:"model"`    // 该副本服务的模型；支持逗号分隔多模型与 "*" 通配；留空 = 不过滤
+	Weight  int    `yaml:"weight"`   // 亲和排序与负载上限分摊权重（≥1）
+}
+
+// Serves 报告该副本是否服务指定模型。
+// 请求 model 为空（非 chat 请求）或副本未声明 model 时放行（不过滤）。
+func (b *Backend) Serves(model string) bool {
+	if model == "" || b.Model == "" || b.Model == "*" {
+		return true
+	}
+	for _, m := range strings.Split(b.Model, ",") {
+		if strings.TrimSpace(m) == model {
+			return true
+		}
+	}
+	return false
 }
 
 // State 为副本运行态：健康、在途计数与简易熔断。

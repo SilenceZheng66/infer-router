@@ -186,6 +186,125 @@ func TestPickerStickyRatioObservable(t *testing.T) {
 	}
 }
 
+// ---- M1b：加权 rendezvous ----
+
+func TestWeightedSortDistribution(t *testing.T) {
+	// 权重 2:1 → 大样本份额 2/3 : 1/3（±10%）
+	nodes := []string{"heavy", "light"}
+	weights := map[string]int{"heavy": 2, "light": 1}
+	count := map[string]int{}
+	const N = 10000
+	for i := 0; i < N; i++ {
+		count[affinity.WeightedSort(fmt.Sprintf("conv-%d", i), nodes, weights)[0]]++
+	}
+	heavyShare := float64(count["heavy"]) / N
+	want := 2.0 / 3.0
+	dev := math.Abs(heavyShare-want) / want
+	if dev > 0.10 {
+		t.Fatalf("heavy share %.3f deviation %.3f > 0.10 (want ~0.667)", heavyShare, dev)
+	}
+}
+
+func TestWeightedSortDeterministic(t *testing.T) {
+	nodes := []string{"a", "b", "c"}
+	weights := map[string]int{"a": 3, "b": 2, "c": 1}
+	first := affinity.WeightedSort("key-W", nodes, weights)
+	for i := 0; i < 20; i++ {
+		again := affinity.WeightedSort("key-W", nodes, weights)
+		for j := range first {
+			if first[j] != again[j] {
+				t.Fatalf("non-deterministic weighted ordering")
+			}
+		}
+	}
+}
+
+func TestWeightedSortEqualsUnweightedWhenEqual(t *testing.T) {
+	nodes := []string{"a", "b", "c", "d"}
+	w1 := map[string]int{"a": 1, "b": 1, "c": 1, "d": 1}
+	const N = 2000
+	for i := 0; i < N; i++ {
+		key := fmt.Sprintf("eq-%d", i)
+		u := affinity.SortNodes(key, nodes)
+		w := affinity.WeightedSort(key, nodes, w1)
+		for j := range u {
+			if u[j] != w[j] {
+				t.Fatalf("equal-weight mismatch at key %s pos %d:\n unweighted %v\n weighted   %v", key, j, u, w)
+			}
+		}
+	}
+}
+
+func TestWeightedSortMinimalDisruption(t *testing.T) {
+	// 加权最小扰动：加入新副本后，原有副本之间的指派完全不变，
+	// 只有部分 key 迁往新副本（迁出比例 ≈ 新副本的加权份额）。
+	nodes3 := []string{"a", "b", "c"}
+	nodes4 := []string{"a", "b", "c", "d"}
+	w3 := map[string]int{"a": 2, "b": 1, "c": 1}
+	w4 := map[string]int{"a": 2, "b": 1, "c": 1, "d": 3}
+	movedToD, movedElsewhere := 0, 0
+	const N = 10000
+	for i := 0; i < N; i++ {
+		key := fmt.Sprintf("wconv-%d", i)
+		o3 := affinity.WeightedSort(key, nodes3, w3)[0]
+		o4 := affinity.WeightedSort(key, nodes4, w4)[0]
+		if o3 != o4 {
+			if o4 == "d" {
+				movedToD++
+			} else {
+				movedElsewhere++
+			}
+		}
+	}
+	if movedElsewhere != 0 {
+		t.Fatalf("existing assignments reshuffled: %d keys moved to non-new nodes", movedElsewhere)
+	}
+	share := float64(movedToD) / N
+	want := 3.0 / 7.0
+	if math.Abs(share-want) > 0.08*want {
+		t.Fatalf("new node share %.3f deviates from weighted share %.3f", share, want)
+	}
+}
+
+func TestPickerWeightedCap(t *testing.T) {
+	// 加权负载上限：cap_i = ceil(α × Σinflight × w_i / Σw)
+	states := makeStates([]string{"a", "b"})
+	states[0].Weight = 2
+	states[1].Weight = 1
+	for i := 0; i < 6; i++ {
+		states[0].Inc()
+	}
+	for i := 0; i < 3; i++ {
+		states[1].Inc()
+	}
+	p := affinity.NewPicker(1.25, 1024)
+
+	key := ""
+	for i := 0; i < 1000; i++ {
+		k := fmt.Sprintf("cap-%d", i)
+		if affinity.WeightedSort(k, []string{"a", "b"}, map[string]int{"a": 2, "b": 1})[0] == "a" {
+			key = k
+			break
+		}
+	}
+	if key == "" {
+		t.Fatal("no key prefers weighted-heavy node")
+	}
+	// 总在途 9：cap_a = ceil(1.25×9×2/3)=8，a=6 < 8 → 不顺延
+	if got := p.Pick(key, states); got.Name != "a" {
+		t.Fatalf("weighted cap too tight: chose %s (a in_flight=6, cap=8)", got.Name)
+	}
+
+	// a 灌到 50：总在途 53，cap_a = ceil(1.25×53×2/3)=45 → 50≥45 顺延；
+	// cap_b = ceil(1.25×53×1/3)=23 → b=3 < 23 接住
+	for states[0].InFlight() < 50 {
+		states[0].Inc()
+	}
+	if got := p.Pick(key, states); got.Name != "b" {
+		t.Fatalf("overloaded weighted home not demoted: chose %s (a=%d, cap≈45)", got.Name, states[0].InFlight())
+	}
+}
+
 // ---- 端到端小模拟：多轮会话流量在双副本下的路由分布 ----
 
 func TestMultiTurnTrafficDistribution(t *testing.T) {

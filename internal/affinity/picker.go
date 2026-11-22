@@ -14,21 +14,22 @@ import (
 	"infer-router/internal/registry"
 )
 
-// SessionKey 从请求中提取会话级稳定 key。
+// ParseRequest 从请求中提取 (会话 key, 请求 model)。
 //
-// 优先级：
+// key 优先级：
 //  1. X-Session-Id header（调用方显式声明，最可靠）；
 //  2. messages 的"对话前缀"：system 全文 + 首条 user 消息。多轮对话中该前缀逐轮不变，
 //     因此同一对话的所有请求稳定命中同一副本（KV cache 前缀复用的前提）。
 //     注意：这与"全 messages hash"不同——全量 hash 每轮都变，没有任何亲和性。
 //
+// model 为请求体中的 model 字段（可能为空），用于按模型筛候选池。
 // body 必须由调用方预先读出（proxy 层需要重放 body），本函数不再消费 req.Body。
-func SessionKey(req *http.Request, body []byte) (string, error) {
+func ParseRequest(req *http.Request, body []byte) (key, model string, err error) {
 	if sid := strings.TrimSpace(req.Header.Get("X-Session-Id")); sid != "" {
-		return "sid:" + sid, nil
+		return "sid:" + sid, parseModel(body), nil
 	}
 	if len(body) == 0 {
-		return "", errors.New("no session id and empty body")
+		return "", "", errors.New("no session id and empty body")
 	}
 	var payload struct {
 		Model    string `json:"model"`
@@ -38,7 +39,7 @@ func SessionKey(req *http.Request, body []byte) (string, error) {
 		} `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", errors.New("body is not openai chat json")
+		return "", "", errors.New("body is not openai chat json")
 	}
 	var system, firstUser string
 	for _, m := range payload.Messages {
@@ -58,9 +59,26 @@ func SessionKey(req *http.Request, body []byte) (string, error) {
 		}
 	}
 	if firstUser == "" {
-		return "", errors.New("no user message to key on")
+		return "", payload.Model, errors.New("no user message to key on")
 	}
-	return "prefix:" + shortHash(system + "\x00" + firstUser), nil
+	return "prefix:" + shortHash(system+"\x00"+firstUser), payload.Model, nil
+}
+
+// SessionKey 仅返回会话 key（兼容既有调用）。
+func SessionKey(req *http.Request, body []byte) (string, error) {
+	key, _, err := ParseRequest(req, body)
+	return key, err
+}
+
+// parseModel 从请求体提取 model 字段，失败返回空串。
+func parseModel(body []byte) string {
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return ""
+	}
+	return payload.Model
 }
 
 // contentString 处理 content 的两种形态：字符串或 OpenAI 分片数组。
@@ -102,8 +120,9 @@ func NewPicker(alpha float64, stickyWindow int) *Picker {
 	return &Picker{Alpha: alpha, track: newTracker(stickyWindow)}
 }
 
-// Pick 选出 key 的亲和副本；亲和目标过载时按 rendezvous 次序顺延到首个未过载副本。
+// Pick 选出 key 的亲和副本；亲和目标过载时按加权 rendezvous 次序顺延到首个未过载副本。
 // 全员过载（极少见）时退化为全局最小在途，保证不饿死。
+// 负载上限按权重分摊：cap_i = ceil(α × Σinflight × w_i / Σw)，等权时退化为 α × 平均在途。
 func (p *Picker) Pick(key string, candidates []*registry.State) *registry.State {
 	if len(candidates) == 0 {
 		return nil
@@ -116,24 +135,30 @@ func (p *Picker) Pick(key string, candidates []*registry.State) *registry.State 
 
 	nodes := make([]string, len(candidates))
 	byName := make(map[string]*registry.State, len(candidates))
+	weights := make(map[string]int, len(candidates))
+	var total int64
+	var sumW int64
 	for i, s := range candidates {
 		nodes[i] = s.Name
 		byName[s.Name] = s
-	}
-
-	ordered := SortNodes(key, nodes)
-	var total int64
-	for _, s := range candidates {
+		w := s.Weight
+		if w < 1 {
+			w = 1
+		}
+		weights[s.Name] = w
+		sumW += int64(w)
 		total += s.InFlight()
 	}
-	cap := int64(math.Ceil(p.Alpha * float64(total) / float64(len(candidates))))
-	if cap < 1 { // 空闲集群边界：avg=0 时 cap=0 会让所有副本"过载"，退化为固定首节点
-		cap = 1
-	}
+
+	ordered := WeightedSort(key, nodes, weights)
 
 	var chosen *registry.State
 	for _, name := range ordered {
 		s := byName[name]
+		cap := int64(math.Ceil(p.Alpha * float64(total) * float64(weights[name]) / float64(sumW)))
+		if cap < 1 { // 空闲集群边界：avg=0 时 cap=0 会让所有副本"过载"，退化为固定首节点
+			cap = 1
+		}
 		if s.InFlight() < cap {
 			chosen = s
 			break

@@ -15,7 +15,7 @@
 
 - **无状态**：`score_i = hash(key, replica_i)`，每个路由进程独立计算、结果一致，不需要共享哈希环元数据。
 - **最小扰动**：副本增减只迁移 `1/n` 会话；环哈希在虚拟节点配比不当时扰动不可控。
-- **天然支持权重**：`score_i = hash(...)^(1/w_i)`（加权 rendezvous），本实现用整数权重扩展。
+- **加权 rendezvous（v0.2.0）**：`u_i = hash/2^64 ∈ (0,1)`，`score_i = u_i^(1/w_i)`，比较 `ln(score_i) = ln(u_i)/w_i`——权重越大 rank 越接近 0，越容易胜出（指数竞速性质：副本份额 = w_i/Σw）。各副本 rank 相互独立，副本增减时已有副本间的指派不变，扰动仍只发生在"迁往新副本"的 key 上。负载上限同步按权重分摊：`cap_i = ceil(α × Σinflight × w_i / Σw)`。
 
 ### 2.2 哈希函数选型
 
@@ -43,13 +43,20 @@ cap_i = ceil(α × Σinflight / n)，α = 1.25
 
 优先级：`X-Session-Id` header → messages 前缀（system 内容 + 首条 user 内容，SHA-256 截断）。多轮对话中该前缀不变，因此整段对话稳定命中同一副本。key 不可提取（如空 messages）时退化为 RR。
 
+### 2.5 模型感知路由（v0.2.0）
+
+- 亲和前先按请求 `model` 筛选健康副本池：backend.model 支持逗号分隔多模型与 `*` 通配；请求 model 为空（非 chat 请求）不过滤。
+- 无副本服务该模型 → 502 结构化错误（`no_backend_for_model`）+ `router_model_nomatch_total{model}` 计数，不落入任何副本。
+- 会话亲和 key 为"模型 + 会话"复合 key：同一会话切换模型视为不同亲和目标，避免把请求钉在与该模型无关的副本上。
+- RR / least_queue 策略路径应用同一过滤语义。
+
 ## 3. 粘性观测：sticky tracker
 
 环形窗口（容量 sticky_window=4096）记录 `key → last replica`。每次 Pick 后统计：**重复出现的 key 中，本次副本 == 上次副本的比例**。首见 key 不计入分母（否则新会话流入会稀释指标）。暴露为 gauge `router_affinity_sticky_ratio`。
 
 ## 4. 健康与降级
 
-- 周期探活（health_interval_s=5）：`GET {base_url}/health`（vLLM/SGLang 原生端点），连续失败摘除，恢复自动加回。
+- 周期探活（health_interval_s=5）：`GET {base_url}/v1/models`（OpenAI 兼容端点，vLLM/SGLang 均原生提供），连续失败摘除，恢复自动加回。
 - 请求级熔断：连续 fail_threshold 次失败打开熔断，cooldown_s 后半开放一个探测请求。
 - 实测降级：kill 一个 vLLM → probe 5s 内摘除 → 后续请求 100% 落到存活副本（30/30），`/statusz` 显示 healthy 1/2。副本恢复后 probe 自动加回。
 
@@ -65,6 +72,7 @@ cap_i = ceil(α × Σinflight / n)，α = 1.25
 | `router_requests_total{backend,status}` | counter | per-backend 请求计数 |
 | `router_affinity_assign_total{backend}` | counter | 亲和指派分布（负载均衡度） |
 | `router_affinity_overload_fallback_total` | counter | bounded load 顺延次数 |
+| `router_model_nomatch_total{model}` | counter | 无副本服务请求模型的拒绝计数 |
 | `router_affinity_sticky_ratio` | gauge | 重复会话同副本比例 |
 | `/statusz` | JSON | strategy / backends / healthy 快照 |
 

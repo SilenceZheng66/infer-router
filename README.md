@@ -12,7 +12,9 @@ infer-router 只做一件事：**把 OpenAI 兼容请求（含 SSE 流式）以�
 
 - **prefix_affinity 策略**（核心）：
   - 无状态 **rendezvous hashing**（murmur3 fmix64 终结器 + FNV 预混）——副本增减时只迁移 `1/n` 会话，其余会话原副本不动
-  - **bounded load**（α=1.25）：亲和副本在途数超过 `ceil(α × 平均在途)` 时顺延次优副本，粘性与均衡兼得
+  - **加权 rendezvous**：`score_i = u_i^(1/w_i)`（u ∈ (0,1) 均匀哈希），`weight` 副本按权重承担对应份额流量；负载上限按权重分摊 `cap_i = ceil(α × Σinflight × w_i / Σw)`
+  - **模型感知路由**：按请求 model 筛选候选池（backend.model 支持逗号分隔多模型与 `*` 通配）；会话亲和 key 含模型维度，同会话切模型不串池
+  - **bounded load**（α=1.25）：亲和副本在途数超过上限时顺延次优副本，粘性与均衡兼得
   - **sticky tracker**：滑动窗口统计重复会话请求的同副本比例，暴露为 `router_affinity_sticky_ratio`
   - 会话 key 优先取 `X-Session-Id` header，否则取 messages 前缀（system + 首条 user）——多轮对话该前缀不变
 - **策略集**：`round_robin | least_queue | prefix_affinity`
@@ -85,12 +87,13 @@ strategy: prefix_affinity
 health_interval_s: 3            # 更快的故障摘除
 breaker: { fail_threshold: 3, cooldown_s: 10 }
 affinity:
-  alpha: 1.25                   # 副本性能异构时对慢副本单独调低权重
+  alpha: 1.25                   # 超载顺延系数
   sticky_window: 16384          # 高并发会话数大时调大统计窗口
 backends:
   - { name: vllm-a, base_url: "http://vllm-a.svc:8001", model: qwen2.5-1.5b, weight: 2 }
   - { name: vllm-b, base_url: "http://vllm-b.svc:8001", model: qwen2.5-1.5b, weight: 1 }
   - { name: vllm-c, base_url: "http://vllm-c.svc:8001", model: qwen2.5-7b,   weight: 1 }
+# model 支持逗号分隔多模型与 "*" 通配；weight 决定亲和份额与负载上限分摊（2:1 即双倍流量）
 ```
 
 部署要点：路由层与副本同机/同可用区部署（探活走内网）；systemd 或 Kubernetes 以静态二进制/镜像托管，资源占用约 1 vCPU / 64MB；Prometheus 抓取 `:8080/metrics` 监控 `router_affinity_sticky_ratio`（<0.9 检查会话 key 约定）与 `router_affinity_overload_fallback_total` 持续增长（调大 alpha 或扩容）；客户端统一携带 `X-Session-Id`。

@@ -30,9 +30,16 @@ var AffinityOverloadFallback = prometheus.NewCounter(
 		Help: "Requests demoted from the affinity-first backend due to bounded load"},
 )
 
+// 模型路由观测：无健康副本服务该模型的请求计数（配置错误或全部下线的信号）。
+var ModelNoMatch = prometheus.NewCounterVec(
+	prometheus.CounterOpts{Name: "router_model_nomatch_total",
+		Help: "Requests rejected because no healthy backend serves the requested model"},
+	[]string{"model"},
+)
+
 // StickyRatioFn 由 affinity 包注入（避免 metrics -> affinity 反向依赖）。
 var StickyRatioFn = func() float64 { return 1.0 }
 
 func init() {
-	prometheus.MustRegister(ReqTotal, InFlight, AffinitySticky, AffinityAssign, AffinityOverloadFallback)
+	prometheus.MustRegister(ReqTotal, InFlight, AffinitySticky, AffinityAssign, AffinityOverloadFallback, ModelNoMatch)
 }

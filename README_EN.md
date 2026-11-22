@@ -12,7 +12,9 @@ infer-router does one thing: **route OpenAI-compatible requests (including SSE s
 
 - **prefix_affinity strategy** (core):
   - Stateless **rendezvous hashing** (murmur3 fmix64 finalizer + FNV pre-mix) — adding/removing a replica migrates only `1/n` of sessions
-  - **Bounded load** (α=1.25): when the preferred replica's in-flight count exceeds `ceil(α × avg in-flight)`, overflow goes to the next-best replica — stickiness and balance at the same time
+  - **Weighted rendezvous**: `score_i = u_i^(1/w_i)` (u ∈ (0,1) uniform hash) — replicas take traffic proportional to `weight`; the load cap is sharded by weight, `cap_i = ceil(α × Σinflight × w_i / Σw)`
+  - **Model-aware routing**: candidate pool filtered by the request's `model` (backend.model accepts comma-separated lists and `*` wildcards); the affinity key is model-scoped, so switching models mid-session never crosses pools
+  - **Bounded load** (α=1.25): when the preferred replica's in-flight count exceeds its cap, overflow goes to the next-best replica — stickiness and balance at the same time
   - **Sticky tracker**: sliding-window ratio of repeated session requests landing on the same replica, exported as `router_affinity_sticky_ratio`
   - Session key: `X-Session-Id` header first, else the messages prefix (system + first user turn) — stable across turns
 - **Strategies**: `round_robin | least_queue | prefix_affinity`
@@ -85,12 +87,13 @@ strategy: prefix_affinity
 health_interval_s: 3            # faster failure eviction
 breaker: { fail_threshold: 3, cooldown_s: 10 }
 affinity:
-  alpha: 1.25                   # lower the weight of heterogeneous/slow replicas individually
+  alpha: 1.25                   # bounded-load spillover factor
   sticky_window: 16384          # raise for high concurrent-session counts
 backends:
   - { name: vllm-a, base_url: "http://vllm-a.svc:8001", model: qwen2.5-1.5b, weight: 2 }
   - { name: vllm-b, base_url: "http://vllm-b.svc:8001", model: qwen2.5-1.5b, weight: 1 }
   - { name: vllm-c, base_url: "http://vllm-c.svc:8001", model: qwen2.5-7b,   weight: 1 }
+# model accepts comma-separated lists and "*" wildcards; weight drives both affinity share and load-cap sharding (2:1 = double traffic)
 ```
 
 Deployment notes: run the router in the same host/zone as the replicas (probes stay on the internal network); host the static binary or image via systemd/Kubernetes (~1 vCPU / 64MB); let Prometheus scrape `:8080/metrics` and watch `router_affinity_sticky_ratio` (<0.9 → check the session-key contract) and sustained growth of `router_affinity_overload_fallback_total` (raise alpha or add replicas); have clients consistently send `X-Session-Id`.

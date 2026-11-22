@@ -28,8 +28,20 @@ affinity:                        # 仅 prefix_affinity 生效
 backends:
   - name: vllm-a
     base_url: http://127.0.0.1:8001   # 不含 /v1，路由层原样透传 /v1/* 路径
-    model: qwen2.5-1.5b
-    weight: 1
+    model: qwen2.5-1.5b               # 该副本服务的模型；逗号分隔多模型（如 "qwen2.5-1.5b,qwen2.5-7b"）或 "*" 通配
+    weight: 1                         # 亲和排序与负载上限分摊权重（≥1），2 表示承担 2 倍流量
+```
+
+多模型混管示例（一个路由实例管两个模型池）：
+
+```yaml
+strategy: prefix_affinity
+backends:
+  - { name: slm-a, base_url: "http://slm-a.svc:8001", model: qwen2.5-1.5b, weight: 2 }
+  - { name: slm-b, base_url: "http://slm-b.svc:8001", model: qwen2.5-1.5b, weight: 1 }
+  - { name: llm-a, base_url: "http://llm-a.svc:8001", model: qwen2.5-7b,   weight: 1 }
+# 请求 model=qwen2.5-1.5b 只会路由到 slm-*；model=qwen2.5-7b 只到 llm-*
+# 无副本服务请求的模型 → 502 + router_model_nomatch_total{model} 计数
 ```
 
 ## 3. 会话 key 约定
@@ -37,6 +49,7 @@ backends:
 - 客户端带 `X-Session-Id` header → 直接作为会话 key（推荐，最稳定）。
 - 未携带 → 取 `messages` 前缀（system 全文 + 首条 user 全文）哈希。多轮对话中该前缀不变，效果等价。
 - 两者都不可用（如空 messages）→ 退化为 RR。
+- 会话亲和 key 含模型维度：同一会话切换 model 视为不同亲和目标，不会把请求钉在与该模型无关的副本上。
 
 ## 4. 与 vLLM 组合部署
 
@@ -103,6 +116,7 @@ python tools/load_test.py http://127.0.0.1:8080 degraded 10 3 5 e1 0.2
   - 负载分布：`sum by (backend) (rate(router_requests_total[1m]))`
   - 粘性率：`router_affinity_sticky_ratio`
   - 超限顺延：`rate(router_affinity_overload_fallback_total[1m])`
+  - 模型路由错误：`rate(router_model_nomatch_total[1m]) > 0` → 检查请求 model 拼写与 backends 的 model 声明
 - `/statusz` 适合接入存活探针与发布检查。
 
 ## 7. 生产部署检查清单
@@ -116,6 +130,6 @@ python tools/load_test.py http://127.0.0.1:8080 degraded 10 3 5 e1 0.2
 
 ## 8. 常见问题
 
-- **副本启动后 statusz 一直 healthy 0**：检查 `base_url` 是否含 `/v1`（不应含）；探活用的是 `{base_url}/health`。
+- **副本启动后 statusz 一直 healthy 0**：检查 `base_url` 是否含 `/v1`（不应含）；探活用的是 `{base_url}/v1/models`（OpenAI 兼容端点，vLLM/SGLang 均原生提供）。
 - **SSE 客户端收不到流**：确认客户端未开响应缓冲；路由层 `FlushInterval=-1` 已逐块转发。
 - **命中率上不去**：先看 KV 容量（`nvidia-smi` 显存 × gpu-memory-utilization 换算 token 容量），LRU 驱逐主导时调大副本显存或减少会话并发；再看 `router_affinity_overload_fallback_total` 是否过高（调大 alpha）。

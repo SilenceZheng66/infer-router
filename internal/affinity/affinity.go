@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"hash/fnv"
+	"math"
 	"sort"
 )
 
@@ -51,6 +52,41 @@ func SortNodes(key string, nodes []string) []string {
 	sort.Slice(ps, func(i, j int) bool {
 		if ps[i].score != ps[j].score {
 			return ps[i].score > ps[j].score
+		}
+		return ps[i].name < ps[j].name
+	})
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.name)
+	}
+	return out
+}
+
+// WeightedSort 加权 rendezvous（Thaler 形式）：u_i = hash/2^64 ∈ (0,1)，
+// score_i = u_i^(1/w_i)，比较 ln(score_i) = ln(u_i)/w_i——权重越大 rank 越接近 0，越容易胜出。
+// 等权（w=1）时 rank 与 ln(u) 单调等价，结果与 SortNodes 完全一致。
+func WeightedSort(key string, nodes []string, weights map[string]int) []string {
+	type pair struct {
+		name string
+		rank float64
+	}
+	const twoPow64 = 18446744073709551616.0 // 2^64
+	ps := make([]pair, 0, len(nodes))
+	for _, n := range nodes {
+		w := weights[n]
+		if w < 1 {
+			w = 1
+		}
+		h := hashPair(key, n)
+		if h == 0 {
+			h = 1 // 2^-64 概率边界，防御性处理（ln(0) 未定义）
+		}
+		u := float64(h) / twoPow64
+		ps = append(ps, pair{n, math.Log(u) / float64(w)})
+	}
+	sort.Slice(ps, func(i, j int) bool {
+		if ps[i].rank != ps[j].rank {
+			return ps[i].rank > ps[j].rank
 		}
 		return ps[i].name < ps[j].name
 	})
