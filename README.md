@@ -42,6 +42,20 @@ infer-router 只做一件事：**把 OpenAI 兼容请求（含 SSE 流式）以�
 
 > 注：命中率为副本 `vllm:prefix_cache_{queries,hits}_total` 计数器差值比；~67% 的绝对值受副本 KV 容量 LRU 驱逐限制（≈10 万 token/副本），路由收益叠加在容量约束之上——副本 KV 容量越大、会话前缀越长，粘性路由的边际收益越大。实验复现步骤见 `docs/usage.md`。
 
+### v0.2.0 五场景端到端回归（`scripts/gpu_regression.sh`，A10 × 双副本 vLLM 0.10.x，qwen2.5-1.5B + LoRA adapter）
+
+| 场景 | 门禁 | 实测 |
+|---|---|---|
+| S1a 同步负载粘性 | sticky ≥ 0.95 | **PASS** sticky=0.985，240/240，TTFT p90=0.525s |
+| S1b jitter 命中率 | ≥ 67.3%（v0.1 基线） | **PASS** hit=74.4%~76.7%（两轮复测），240/240 |
+| S2 双模型零串池 | 跨池请求 0、mismatch 不增 | **PASS** LoRA 双模型（base+adapter）：20 发全部落目标副本（delta=20，a=0），`router_model_mismatch_total`=0，未声明模型 → 502 |
+| S3 压测中途 kill 副本 | 客户端零失败 | **PASS** TERM 副本于 t+20s，80/80 请求零失败（请求级 failover） |
+| S4 KV 容量感知分流 | 高水位改派 | **FAIL（引擎指标缺口）**：该 vLLM 构建的 `kv_cache_usage_perc` 恒 0.0（仅统计外部 KV connector），不暴露 GPU 块水位，分流无法触发；M5 全链路经 mock 集成测试验证（`test/kvaware_test.go`），`kv.metric_name` 的命名空间前缀兼容已在真实 /metrics 上验证。旧版 vLLM（0.8/0.9，暴露 `gpu_cache_usage_perc`）可用 |
+| S5 运行中扩缩副本 | backends/healthy 即时变化、PID 不变 | **PASS** 管理 API add=200 + SIGHUP 热更，backends 2→3→2、healthy 相应变化，路由进程 PID 不变 |
+| S6 收尾 | /readyz 200 | **PASS** |
+
+回归 runbook（含阶段 marker、结果回传、副本清理）与引导脚本随仓库发布：`scripts/gpu_regression.sh`、`scripts/gpu_bootstrap.sh`、`tools/load_test.py`、`tools/compare_cache.py`。
+
 ## 快速开始
 
 ```bash

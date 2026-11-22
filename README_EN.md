@@ -42,6 +42,20 @@ Incremental-conversation load (40 sessions × 6 turns; each turn appends a ~250-
 
 > Note: hit rates are delta ratios of replica `vllm:prefix_cache_{queries,hits}_total` counters; the ~67% absolute value is capped by per-replica KV-capacity LRU eviction (~100k tokens/replica) — the routing benefit stacks on top of that constraint. The larger the replica KV capacity and the longer the session prefixes, the greater the marginal value of sticky routing. Reproduction steps in `docs/usage.md`.
 
+### v0.2.0 five-scenario end-to-end regression (`scripts/gpu_regression.sh`, A10 × 2× vLLM 0.10.x, Qwen2.5-1.5B + LoRA adapter)
+
+| Scenario | Gate | Result |
+|---|---|---|
+| S1a sync-load stickiness | sticky ≥ 0.95 | **PASS** sticky=0.985, 240/240, TTFT p90=0.525s |
+| S1b jitter hit rate | ≥ 67.3% (v0.1 baseline) | **PASS** hit=74.4%–76.7% (two runs), 240/240 |
+| S2 dual-model zero cross-pool | 0 cross-pool requests, no mismatch | **PASS** LoRA dual-model (base+adapter): all 20 requests land on the target replica (delta=20, a=0), `router_model_mismatch_total`=0, undeclared model → 502 |
+| S3 kill a replica mid-load | zero client failures | **PASS** replica TERMed at t+20s, 80/80 zero failures (request-level failover) |
+| S4 KV-capacity-aware steering | high-watermark re-dispatch | **FAIL (engine metric gap)**: this vLLM build's `kv_cache_usage_perc` is constant 0.0 (external KV-connector scope only) and no GPU-block water-level gauge is exposed, so steering cannot trigger; M5 fully validated in mock integration tests (`test/kvaware_test.go`), and the namespace-prefix tolerance of `kv.metric_name` was verified against real /metrics. Legacy vLLM (0.8/0.9, exposing `gpu_cache_usage_perc`) works |
+| S5 live replica add/remove | backends/healthy change instantly, PID unchanged | **PASS** admin API add=200 + SIGHUP hot-reload, backends 2→3→2 with health following, router PID unchanged |
+| S6 wrap-up | /readyz 200 | **PASS** |
+
+Regression runbook (phase markers, result upload, replica cleanup) and bootstrap ship with the repo: `scripts/gpu_regression.sh`, `scripts/gpu_bootstrap.sh`, `tools/load_test.py`, `tools/compare_cache.py`.
+
 ## Quick start
 
 ```bash
