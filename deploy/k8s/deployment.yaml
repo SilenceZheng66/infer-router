@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infer-router
+spec:
+  replicas: 2                      # 路由器无状态、确定性路由，多实例各持各的前缀树/粘性窗口即可水平扩展
+  selector:
+    matchLabels: { app: infer-router }
+  template:
+    metadata:
+      labels: { app: infer-router }
+    spec:
+      containers:
+        - name: router
+          image: ghcr.io/silencezheng66/infer-router:latest
+          args: ["-config", "/etc/infer-router/config.yaml"]
+          ports: [{ containerPort: 8080 }]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/infer-router
+          readinessProbe:          # 有可用副本才接流量（全摘除时 Endpoints 同步摘除本 Pod）
+            httpGet: { path: /readyz, port: 8080 }
+            periodSeconds: 3
+          livenessProbe:           # 进程存活
+            httpGet: { path: /statusz, port: 8080 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 200m, memory: 64Mi }
+            limits: { cpu: "1", memory: 128Mi }
+      volumes:
+        - name: config
+          configMap: { name: infer-router-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: infer-router
+spec:
+  selector: { app: infer-router }
+  ports: [{ port: 80, targetPort: 8080 }]

@@ -21,6 +21,8 @@ infer-router 只做一件事：**把 OpenAI 兼容请求（含 SSE 流式）以�
 - **策略集**：`round_robin | least_queue | prefix_affinity`
 - **健康探测 + 熔断**：周期探活自动摘除死副本；请求级 fail_threshold 熔断 + 冷却半开探测；**错误分类**——5xx/连接错误计熔断失败，4xx 不计（404+model 记 `router_model_mismatch_total`，暴露副本声明与实际 serving 不符）
 - **请求级 failover**：上游 5xx/连接错误且响应尚未写给客户端时，按亲和次序自动换下一个副本重试一次（SSE 一旦开始流出即不重试）；`router_retries_total{from,to}` 可观测，`retry.enabled=false` 可关闭
+- **动态发现 + 热加载**：`POST /admin/backends`（Bearer token 或仅 localhost）运行中增删副本、零重启；`SIGHUP` 重载整份配置，解析失败自动保留旧配置；`deploy/k8s/` 提供 ConfigMap + reloader 脚本，把 Endpoints 变化渲染进配置触发热更（与 service-discovery 网关能力对齐）
+- **探针与 HA**：`/readyz` 全副本摘除时 503（readiness），`/statusz` 恒 200（liveness）；路由器无状态，多实例 + 上层 LB 即水平扩展
 - **可观测**：`/metrics`（Prometheus：per-backend 请求计数、粘性率、fallback 计数、重试计数、模型路由拒绝/不符）、`/statusz`（健康快照）
 - **SSE 原样透传**：`FlushInterval=-1` 逐块转发，不缓冲流式响应
 

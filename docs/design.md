@@ -72,6 +72,13 @@ cap_i = ceil(α × Σinflight / n)，α = 1.25
 - 请求级 failover（v0.2.0）：传输层（retryRoundTripper）在 5xx/连接错误、且响应尚未写给客户端时，按加权 rendezvous 次序换下一个副本重发一次（`retry.enabled=false` 关闭）。SSE 一旦开始流出即不再重试——响应头到达客户端后，body 复制期间的一切失败走 ErrorHandler 原样回错并计入实际服务副本。重试计数 `router_retries_total{from,to}`。
 - 实测降级：kill 一个 vLLM → probe 5s 内摘除 → 后续请求 100% 落到存活副本（30/30），`/statusz` 显示 healthy 1/2。副本恢复后 probe 自动加回。
 
+### 4.1 动态发现、热加载与探针（v0.2.0）
+
+- **热加载**：运行态以"代"为单位整体换装——Swap 原子重建 registry/策略选择器后一次替换；持有旧组件引用的在途请求继续处理直到完成（自然排空），旧探活循环随之取消、新探活循环以同一周期重启。触发方式：`SIGHUP`（重载整份配置文件）与 `POST /admin/backends`（单副本增删）。配置解析/构建失败时保留旧配置继续服务（回滚语义）。亲和树与粘性窗口为进程内状态，热更后重建，不影响路由正确性。
+- **管理 API**：`POST /admin/backends`，body `{"op":"add"|"remove","backend":{...}}`；`admin_token` 配置时要求 `Authorization: Bearer`（或 `X-Admin-Token`），未配置时仅接受 localhost。即改即生效，`/statusz` 同步体现。
+- **动态发现（K8s 等价物）**：`deploy/k8s/` 提供 ConfigMap + reloader 脚本——从引擎 Service 的 Endpoints 渲染 backends 进 ConfigMap，`kill -HUP 1`（或管理 API）触发热更。与带 `--service-discovery` 的推理网关能力对齐，机制为轮询脚本而非 API watch；后续可升级 client-go 原生。
+- **探针与 HA**：`/readyz` = 有可用副本才 200（全摘除 503，K8s readiness 同步摘除本 Pod 流量）；`/statusz` = 进程存活（liveness）。路由器完全无状态（确定性路由），多实例 + 上层 LB 即水平扩展；多实例各自维护前缀树/粘性窗口，各自统计命中率。
+
 ## 5. 转发层
 
 - `httputil.ReverseProxy` + `FlushInterval=-1`：SSE 逐块透传，不缓冲。

@@ -1,0 +1,31 @@
+# infer-router 的 Kubernetes 等价动态发现方案：
+# 与带 --service-discovery 的推理网关能力对齐——后端列表变化由 reloader 脚本
+# 从 Endpoints 渲染进 ConfigMap，再触发热更（SIGHUP 或管理 API），路由进程零重启。
+# 机制说明见 docs/design.md「动态发现」一节。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infer-router-config
+data:
+  config.yaml: |
+    addr: ":8080"
+    strategy: prefix_affinity
+    admin_token: ""                # 留空 = 管理接口仅接受 localhost（reloader 侧车/exec 调用）；跨 Pod 调用请设置令牌
+    health_interval_s: 3
+    breaker: { fail_threshold: 3, cooldown_s: 15 }
+    retry: { enabled: true, max: 1 }
+    affinity:
+      alpha: 1.25
+      sticky_window: 16384
+      tree:
+        max_tree_size: 65536
+        cache_threshold: 0.5
+    backends:
+      - name: vllm-a
+        base_url: http://10.0.0.11:8000   # reloader.sh 从 Endpoints 渲染；不含 /v1
+        model: "*"
+        weight: 1
+      - name: vllm-b
+        base_url: http://10.0.0.12:8000
+        model: "*"
+        weight: 1

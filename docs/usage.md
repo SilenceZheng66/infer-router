@@ -18,6 +18,7 @@ docker run -p 8080:8080 -v $(pwd)/config:/app/config infer-router -config /app/c
 ```yaml
 addr: ":8080"                    # 监听地址
 strategy: prefix_affinity        # round_robin | least_queue | prefix_affinity
+admin_token: ""                  # 管理 API 令牌；留空 = 仅接受 localhost 调用
 health_interval_s: 5             # 副本探活周期
 breaker:
   fail_threshold: 3              # 连续失败次数 → 打开熔断
@@ -141,7 +142,7 @@ python tools/load_test.py http://127.0.0.1:8080 degraded 10 3 5 e1 0.2
 - [ ] Prometheus 抓取 `:8080/metrics`：`router_affinity_sticky_ratio < 0.9` 告警（检查会话 key 约定）；`router_affinity_overload_fallback_total` 持续增长 → 调大 `alpha` 或扩副本
 - [ ] 混合前缀树监控：`router_prefix_tree_nodes` 设上限告警；`router_prefix_match_ratio` 随会话基数下滑 → 调大 `max_tree_size` 或 `chunk_chars`
 - [ ] 副本 KV 容量核算：`gpu-memory-utilization × 显存 - 模型权重` 折算 token 容量，会话前缀总需求超容量时 LRU 驱逐会稀释粘性收益（见 README 实测数据）
-- [ ] systemd/Kubernetes 托管静态二进制（约 1 vCPU / 64MB），配 liveness probe 打 `/statusz`
+- [ ] systemd/Kubernetes 托管静态二进制（约 1 vCPU / 64MB），配 liveness probe 打 `/statusz`、readiness probe 打 `/readyz`
 - [ ] 滚动更新副本时 rendezvous 只迁移 1/n 会话，无需路由层重启
 
 ## 8. 常见问题
@@ -149,3 +150,31 @@ python tools/load_test.py http://127.0.0.1:8080 degraded 10 3 5 e1 0.2
 - **副本启动后 statusz 一直 healthy 0**：检查 `base_url` 是否含 `/v1`（不应含）；探活用的是 `{base_url}/v1/models`（OpenAI 兼容端点，vLLM/SGLang 均原生提供）。
 - **SSE 客户端收不到流**：确认客户端未开响应缓冲；路由层 `FlushInterval=-1` 已逐块转发。
 - **命中率上不去**：先看 KV 容量（`nvidia-smi` 显存 × gpu-memory-utilization 换算 token 容量），LRU 驱逐主导时调大副本显存或减少会话并发；再看 `router_affinity_overload_fallback_total` 是否过高（调大 alpha）。
+
+## 9. 动态发现与热更（v0.2.0）
+
+### 9.1 运行中增删副本（管理 API）
+
+```bash
+# 未配置 admin_token：仅接受 localhost 调用
+curl -s -X POST http://127.0.0.1:8080/admin/backends \
+  -d '{"op":"add","backend":{"name":"vllm-c","base_url":"http://10.0.0.13:8000","model":"qwen2.5-1.5b","weight":1}}'
+# 配置了 admin_token：Authorization: Bearer <token>（或 X-Admin-Token 头）
+curl -s -X POST http://127.0.0.1:8080/admin/backends -H "Authorization: Bearer $TOKEN" \
+  -d '{"op":"remove","backend":{"name":"vllm-c"}}'
+```
+
+生效为原子换装：`/statusz` 即时体现、零重启；被摘副本上处理中的请求自然排空后释放。非法输入（重名/未知副本/缺字段）返回 4xx 且不触碰运行态。
+
+### 9.2 整份配置热更（SIGHUP）
+
+修改配置文件后 `kill -HUP <pid>`：解析成功原子生效（副本集/策略/affinity/retry 全部可热更），失败保留旧配置继续服务并输出日志。
+
+### 9.3 Kubernetes 动态发现（deploy/k8s/）
+
+`configmap.yaml` + `deployment.yaml` + `reloader.sh`：reloader 脚本从引擎 Service 的 Endpoints 渲染 backends 进 ConfigMap，再对 Pod 发 SIGHUP（或改用管理 API）。与带 `--service-discovery` 的推理网关能力对齐（轮询脚本机制，可后续升级 client-go watch）。副本扩缩容全程不重启路由进程。
+
+### 9.4 探针
+
+- readiness：`/readyz`——有可用副本 200，全副本摘除 503（K8s readinessProbe 同步摘除本 Pod 流量）
+- liveness：`/statusz`——进程存活即 200

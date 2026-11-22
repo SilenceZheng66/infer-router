@@ -1,5 +1,5 @@
 // infer-router 入口：加载配置 → 健康探测 → 策略路由 → 透传。
-// 装配逻辑在 internal/app（cmd 与集成测试共用同一代码路径）。
+// 装配与热加载逻辑在 internal/app（cmd 与集成测试共用同一代码路径）。
 package main
 
 import (
@@ -28,8 +28,20 @@ func main() {
 	defer stop()
 
 	rt, handler := app.Build(cfg)
-	rt.Reg.ProbeAll(ctx)
-	rt.Reg.Start(ctx, time.Duration(cfg.HealthIntervalSec)*time.Second)
+	rt.StartProbes(time.Duration(cfg.HealthIntervalSec) * time.Second)
+
+	// SIGHUP 热加载：配置文件变更后原子重建运行态；解析失败保留旧配置继续服务
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for range hup {
+			if err := rt.ReloadFrom(*cfgPath); err != nil {
+				log.Printf("reload config: %v (keeping previous configuration)", err)
+				continue
+			}
+			log.Printf("configuration reloaded from %s", *cfgPath)
+		}
+	}()
 
 	srv := &http.Server{Addr: cfg.Addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() {

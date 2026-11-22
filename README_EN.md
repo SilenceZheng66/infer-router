@@ -21,6 +21,8 @@ infer-router does one thing: **route OpenAI-compatible requests (including SSE s
 - **Strategies**: `round_robin | least_queue | prefix_affinity`
 - **Health probing + breaker**: periodic probes evict dead replicas; request-level fail_threshold breaker with cooldown half-open probing; **error classification** — 5xx/connection errors count as breaker failures, 4xx do not (404+model lands in `router_model_mismatch_total`, surfacing serving-state drift between replica declaration and reality)
 - **Request-level failover**: on upstream 5xx/connection error with zero bytes written to the client, the router automatically retries once on the next-best replica by affinity order (never after SSE has started streaming); observable via `router_retries_total{from,to}`, disable with `retry.enabled=false`
+- **Discovery + hot reload**: `POST /admin/backends` (bearer token, or localhost-only) adds/removes replicas on a running router with zero restarts; `SIGHUP` reloads the whole config file, keeping the previous one on parse failure; `deploy/k8s/` ships a ConfigMap + reloader script that renders Endpoints changes into the config and triggers a reload (capability parity with service-discovery gateways)
+- **Probes & HA**: `/readyz` returns 503 when every replica is evicted (readiness), `/statusz` stays 200 (liveness); the router is stateless — run multiple instances behind an LB to scale out
 - **Observability**: `/metrics` (Prometheus: per-backend requests, sticky ratio, overflow fallbacks, retries, model-routing rejects/mismatches), `/statusz` (health snapshot)
 - **SSE pass-through**: `FlushInterval=-1` streams chunks through without buffering
 

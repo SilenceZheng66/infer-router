@@ -10,10 +10,10 @@ import (
 
 // Backend 为配置中的副本描述。
 type Backend struct {
-	Name    string `yaml:"name"`
-	BaseURL string `yaml:"base_url"` // 不含 /v1
-	Model   string `yaml:"model"`    // 该副本服务的模型；支持逗号分隔多模型与 "*" 通配；留空 = 不过滤
-	Weight  int    `yaml:"weight"`   // 亲和排序与负载上限分摊权重（≥1）
+	Name    string `yaml:"name" json:"name"`
+	BaseURL string `yaml:"base_url" json:"base_url"` // 不含 /v1
+	Model   string `yaml:"model" json:"model"`       // 该副本服务的模型；支持逗号分隔多模型与 "*" 通配；留空 = 不过滤
+	Weight  int    `yaml:"weight" json:"weight"`     // 亲和排序与负载上限分摊权重（≥1）
 }
 
 // Serves 报告该副本是否服务指定模型。
