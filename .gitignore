@@ -5,3 +5,4 @@ infer-router
 bin/
 .idea/
 .vscode/
+build/
