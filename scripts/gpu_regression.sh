@@ -21,7 +21,7 @@ MODEL_DECL="${MODEL_DECL:-qwen2.5-1.5b}"
 MODEL_PATH="${MODEL_PATH:-/mnt/workspace/models/qwen2.5-1.5b}"
 MODEL_05B_REPO="${MODEL_05B_REPO:-Qwen/Qwen2.5-0.5B-Instruct}"
 A=127.0.0.1:8001; B=127.0.0.1:8002; C=127.0.0.1:8003; RT=127.0.0.1:8080
-UTIL_A=0.38; UTIL_B=0.38; UTIL_C=0.18
+UTIL_A=0.30; UTIL_B=0.30; UTIL_C=0.15
 LOADER="$WS/bundle/tools/load_test.py"
 CMP="$WS/bundle/tools/compare_cache.py"
 BIN="${BIN:-$WS/bundle/infer-router-linux}"
@@ -112,7 +112,7 @@ chmod +x "$BIN" 2>/dev/null || true
 pkill -f "infer-router-linux" 2>/dev/null || true
 DECL_A="$MODEL_DECL"; DECL_B="$MODEL_DECL"
 write_router_cfg "$WS/cfg-s1.yaml" "$MODEL_DECL" ""
-start_vllm "$R/vllm-a.pid" 8001 "$UTIL_A" 8192 "$MODEL_PATH"; wait_ready "$A"
+start_vllm "$R/vllm-a.pid" 8001 "$UTIL_A" 8192 "$MODEL_PATH"; wait_ready "$A"; sleep 45; say "vllm-a settle done, starting vllm-b"
 start_vllm "$R/vllm-b.pid" 8002 "$UTIL_B" 8192 "$MODEL_PATH"; wait_ready "$B"
 start_router "$WS/cfg-s1.yaml"
 
@@ -150,8 +150,8 @@ else
   M2_KIND="standalone-0.5b"; M2_MODEL="qwen2.5-0.5b"
   say "无 adapter → 0.5B 第三副本（a/b 降至 0.30）"
   stop_vllm "$R/vllm-a.pid" 8001; stop_vllm "$R/vllm-b.pid" 8002; sleep 5
-  UTIL_A=0.30; UTIL_B=0.30
-  start_vllm "$R/vllm-a.pid" 8001 "$UTIL_A" 8192 "$MODEL_PATH"; wait_ready "$A"
+  UTIL_A=0.30; UTIL_B=0.30; UTIL_C=0.15
+  start_vllm "$R/vllm-a.pid" 8001 "$UTIL_A" 8192 "$MODEL_PATH"; wait_ready "$A"; sleep 45; say "vllm-a settle done (S2 fallback), starting vllm-b"
   start_vllm "$R/vllm-b.pid" 8002 "$UTIL_B" 8192 "$MODEL_PATH"; wait_ready "$B"
   python3 -m pip install -q modelscope -i https://pypi.tuna.tsinghua.edu.cn/simple >> "$R/pip.log" 2>&1
   python3 -c "from modelscope import snapshot_download; snapshot_download('$MODEL_05B_REPO', local_dir='/mnt/workspace/models/qwen2.5-0.5b')" >> "$R/dl05b.log" 2>&1
