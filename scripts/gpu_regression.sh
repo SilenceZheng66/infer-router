@@ -32,7 +32,7 @@ mark(){ touch "$WS/$1"; }
 gate(){ if [ "$2" = "1" ]; then echo "PASS  $1  $3" | tee -a "$R/summary.txt"; PASS=$((PASS+1));
   else echo "FAIL  $1  $3" | tee -a "$R/summary.txt"; FAIL=$((FAIL+1)); fi; }
 snap_router(){ curl -s "http://$RT/metrics" | grep -E '^router_' > "$R/$1"; }
-vllm_cache_snap(){ curl -s "http://127.0.0.1:$2/metrics" | grep -E 'prefix_cache_(queries|hits)_total ' | sed "s/^/$1 /" >> "$3"; }
+vllm_cache_snap(){ curl -s "http://127.0.0.1:$2/metrics" | grep -E '^vllm:prefix_cache_(queries|hits)_total( |\{)' | grep -v external | sed "s/^/$1 /" >> "$3"; }
 mval(){ grep -E "^$2( |\{)" "$1" 2>/dev/null | awk '{print $NF}' | head -1; }
 wait_ready(){ local addr=$1 path=${2:-/v1/models}; for _ in $(seq 1 150); do curl -sf "http://$addr$path" >/dev/null 2>&1 && { say "$addr ready"; return 0; }; sleep 5; done; say "TIMEOUT $addr not ready"; return 1; }
 statusz(){ curl -s "http://$RT/statusz" > "$R/$1"; cat "$R/$1"; }

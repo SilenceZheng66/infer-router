@@ -65,7 +65,7 @@ cap_i = ceil(α × Σinflight / n)，α = 1.25
 
 自产实测结论：**副本 KV 容量是粘性收益的上限，LRU 驱逐主导 miss**——前缀树把会话钉在持有前缀的副本上，但该副本 KV 满载时新前缀立即被驱逐，粘性与缓存收益同时失效。全局 KV 索引方案需要事件流与外部组件；infer-router 取轻量中间态：**探活循环顺带抓副本 /metrics 的 KV 使用率，路由时只看一个水位**。
 
-- **抓取**：ProbeAll 顺带 GET `{base}/metrics`，解析 `kv.metric_name`（缺省 vLLM 的 `gpu_cache_usage_perc`，SGLang 可配），暴露 `router_backend_kv_util{backend}`；抓取失败保留上次取值，不影响健康判定。
+- **抓取**：ProbeAll 顺带 GET `{base}/metrics`，解析 `kv.metric_name`（缺省 vLLM 的 `gpu_cache_usage_perc`，SGLang 可配），暴露 `router_backend_kv_util{backend}`；指标名匹配剥离 `{label}` 后兼容命名空间前缀（真实 vLLM 暴露 `vllm:gpu_cache_usage_perc`，短名配置即可命中），抓取失败保留上次取值，不影响健康判定。
 - **分流**：rendezvous top-k（默认 2）内，首选副本 `kv_util > kv.high_watermark`（默认 0.9）时，改派窗口内 KV 余量最大的未过载候选（`router_kv_steered_total` 计数）。树命中路径同样检查——命中副本高水位时转入派单，避免新请求继续压进正在驱逐的副本；分流后树按新副本更新归属，后续轮次沿新副本保持粘性。
 - **cap 缩放（可选，默认关）**：`cap_i × (1 − kv_util_i)`——高水位副本的并发承载按余量收缩，突发下 bounded load 自动把溢出派往低水位副本。
 - **零回归边界**：低水位（含 KV 抓取失败/引擎未暴露，util=0）时分流不触发，行为与基线一致；RR / least_queue 路径不应用 KV 语义。

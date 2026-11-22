@@ -102,7 +102,7 @@ affinity:
 kv:                             # KV 容量感知分流（缺省开启，仅高水位触发）
   high_watermark: 0.9           # 首选副本 KV 超过此值时分流
   top_k: 2                      # 分流决策窗口（rendezvous 前 k 候选）
-  metric_name: gpu_cache_usage_perc  # 副本 KV 指标名（vLLM 缺省；SGLang 按需替换）
+  metric_name: gpu_cache_usage_perc  # 副本 KV 指标名（vLLM 缺省；自动兼容 vllm: 前缀，SGLang 按需替换）
   cap_scale: false              # 负载上限按 KV 余量缩放（默认关）
 backends:
   - { name: vllm-a, base_url: "http://vllm-a.svc:8001", model: qwen2.5-1.5b, weight: 2 }

@@ -184,6 +184,8 @@ func fetchKV(ctx context.Context, client *http.Client, s *State, metric string) 
 }
 
 // parseMetricValue 从 Prometheus 文本格式中解析无标签或带标签指标的值。
+// 指标名兼容引擎命名空间前缀：真实 vLLM 暴露 vllm:gpu_cache_usage_perc，
+// 配置使用短名 gpu_cache_usage_perc 时按 ":name" 后缀匹配（先剥离 {label} 部分）。
 func parseMetricValue(text, name string) (float64, bool) {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -194,7 +196,11 @@ func parseMetricValue(text, name string) (float64, bool) {
 		if len(fields) < 2 {
 			continue
 		}
-		if fields[0] == name || strings.HasPrefix(fields[0], name+"{") {
+		ident := fields[0]
+		if i := strings.Index(ident, "{"); i >= 0 {
+			ident = ident[:i]
+		}
+		if ident == name || strings.HasSuffix(ident, ":"+name) {
 			if v, err := strconv.ParseFloat(fields[1], 64); err == nil {
 				return v, true
 			}

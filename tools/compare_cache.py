@@ -6,6 +6,9 @@ path = sys.argv[1]
 label = sys.argv[2] if len(sys.argv) > 2 else ""
 vals = []
 for line in open(path):
+    # 只取数值行：跳过 HELP/TYPE 注释、_created 派生指标与 external_* 跨实例指标
+    if line.lstrip().startswith("#") or "_created" in line or "external" in line:
+        continue
     m = re.search(r'prefix_cache_(queries|hits)_total.* ([0-9.]+)', line)
     if m:
         vals.append(float(m.group(2)))

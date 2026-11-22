@@ -102,7 +102,7 @@ affinity:
 kv:                             # KV-capacity-aware steering (on by default, triggers only at high watermark)
   high_watermark: 0.9           # steer away when the top candidate exceeds this
   top_k: 2                      # steering decision window (top-k rendezvous candidates)
-  metric_name: gpu_cache_usage_perc  # engine KV metric name (vLLM default; adjust for SGLang)
+  metric_name: gpu_cache_usage_perc  # engine KV metric name (vLLM default; vllm: prefix auto-handled, adjust for SGLang)
   cap_scale: false              # scale load caps by KV headroom (off by default)
 backends:
   - { name: vllm-a, base_url: "http://vllm-a.svc:8001", model: qwen2.5-1.5b, weight: 2 }
