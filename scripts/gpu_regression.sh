@@ -76,7 +76,7 @@ health_interval_s: 3
 breaker: { fail_threshold: 3, cooldown_s: 15 }
 retry: { enabled: true, max: 1 }
 affinity: { alpha: 1.25, sticky_window: 4096 }
-kv: { enabled: true, high_watermark: 0.9, top_k: 2, metric_name: vllm:gpu_cache_usage_perc, cap_scale: false }
+kv: { enabled: true, high_watermark: 0.9, top_k: 2, metric_name: kv_cache_usage_perc, cap_scale: false }
 backends:
   - name: vllm-a
     base_url: http://$A
@@ -222,7 +222,7 @@ $PY "$LOADER" "http://$A" s4_flood 120 4 8 f1 0 > "$R/s4_flood.json" 2>&1 &
 FLOODPID=$!
 UTIL_A_VAL=0
 for _ in $(seq 1 60); do
-  UTIL_A_VAL=$(curl -s "http://$A/metrics" | grep -E '^(vllm:)?gpu_cache_usage_perc( |\{)' | awk '{print $NF}' | head -1)
+  UTIL_A_VAL=$(curl -s "http://$A/metrics" | grep -E '^(vllm:)?(gpu|kv)_cache_usage_perc( |\{)' | awk '{print $NF}' | head -1)
   say "vllm-a gpu_cache_usage_perc=${UTIL_A_VAL:-0}"
   "$PY" -c "import sys; sys.exit(0 if float('${UTIL_A_VAL:-0}')>=0.90 else 1)" && break
   sleep 10
