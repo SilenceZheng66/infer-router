@@ -48,6 +48,15 @@ type TreeCfg struct {
 	ChunkChars        int     `yaml:"chunk_chars"`         // 归一化分块粒度（rune），缺省 256
 }
 
+// KVCfg KV 容量感知路由配置（M5，差异化能力）。
+type KVCfg struct {
+	Enabled       *bool   `yaml:"enabled"`        // 高水位分流，缺省 true
+	HighWatermark float64 `yaml:"high_watermark"` // KV 高水位阈值，缺省 0.9
+	TopK          int     `yaml:"top_k"`          // 分流决策窗口（rendezvous 前 k 候选），缺省 2
+	MetricName    string  `yaml:"metric_name"`    // 副本 /metrics 的 KV 指标名，缺省 gpu_cache_usage_perc（vLLM）
+	CapScale      *bool   `yaml:"cap_scale"`      // 负载上限按 KV 余量缩放，缺省 false
+}
+
 // RetryCfg 请求级 failover 配置。指针字段区分"未配置"与显式 false，保证缺省值语义。
 type RetryCfg struct {
 	Enabled             *bool `yaml:"enabled"`                // 缺省 true
@@ -71,6 +80,7 @@ type Config struct {
 	Breaker           BreakerCfg         `yaml:"breaker"`
 	Affinity          AffinityCfg        `yaml:"affinity"`
 	Retry             RetryCfg           `yaml:"retry"`
+	KV                KVCfg              `yaml:"kv"`
 	Backends          []registry.Backend `yaml:"backends"`
 }
 
@@ -112,6 +122,15 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Affinity.Tree.ChunkChars <= 0 {
 		cfg.Affinity.Tree.ChunkChars = 256
+	}
+	if cfg.KV.HighWatermark <= 0 {
+		cfg.KV.HighWatermark = 0.9
+	}
+	if cfg.KV.TopK <= 0 {
+		cfg.KV.TopK = 2
+	}
+	if cfg.KV.MetricName == "" {
+		cfg.KV.MetricName = "gpu_cache_usage_perc"
 	}
 }
 
@@ -156,6 +175,7 @@ func buildComponents(cfg *Config) (*registry.Registry, balancer.Balancer, *affin
 		cfg.Breaker.FailThreshold,
 		time.Duration(cfg.Breaker.CooldownSec*float64(time.Second)),
 	)
+	reg.SetKVMetric(cfg.KV.MetricName) // 探活循环顺带抓 KV 使用率（M5）
 
 	var bal balancer.Balancer
 	var picker *affinity.Picker
@@ -170,6 +190,9 @@ func buildComponents(cfg *Config) (*registry.Registry, balancer.Balancer, *affin
 			tr.StartEviction(time.Duration(cfg.Affinity.Tree.EvictionIntervalS * float64(time.Second)))
 			picker.AttachTree(tr, cfg.Affinity.Tree.CacheThreshold)
 			metrics.PrefixMatchRatioFn = tr.MatchRatio
+		}
+		if boolVal(cfg.KV.Enabled, true) { // KV 容量感知分流（缺省开启，仅高水位触发）
+			picker.AttachKV(cfg.KV.HighWatermark, cfg.KV.TopK, boolVal(cfg.KV.CapScale, false))
 		}
 		bal = &balancer.RoundRobin{} // key 不可提取时（如非 chat 请求）的兜底
 	default:

@@ -67,9 +67,21 @@ var PrefixTreeNodes = prometheus.NewGaugeVec(
 	[]string{"model"},
 )
 
+// KV 容量感知观测（M5）：副本 KV 水位 + 高水位分流计数。
+var BackendKVUtil = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{Name: "router_backend_kv_util",
+		Help: "KV cache usage fraction per backend (scraped from engine /metrics; 0 = unknown)"},
+	[]string{"backend"},
+)
+
+var KVSteered = prometheus.NewCounter(
+	prometheus.CounterOpts{Name: "router_kv_steered_total",
+		Help: "Requests diverted from a high-KV-watermark replica to one with more KV headroom"},
+)
+
 // StickyRatioFn 由 affinity 包注入（避免 metrics -> affinity 反向依赖）。
 var StickyRatioFn = func() float64 { return 1.0 }
 
 func init() {
-	prometheus.MustRegister(ReqTotal, InFlight, AffinitySticky, AffinityAssign, AffinityOverloadFallback, ModelNoMatch, Retries, ModelMismatch, PrefixMatchRatio, PrefixTreeNodes)
+	prometheus.MustRegister(ReqTotal, InFlight, AffinitySticky, AffinityAssign, AffinityOverloadFallback, ModelNoMatch, Retries, ModelMismatch, PrefixMatchRatio, PrefixTreeNodes, BackendKVUtil, KVSteered)
 }

@@ -37,6 +37,12 @@ retry:                           # 请求级 failover（缺省开启，重试一
   max: 1                         # 额外重试次数
   retry_on_5xx: true
   retry_on_connect_error: true
+kv:                              # KV 容量感知分流（缺省开启，仅 prefix_affinity 生效）
+  enabled: true                  # false = 完全关闭分流
+  high_watermark: 0.9            # 首选副本 KV 超过此值时分流到余量大者
+  top_k: 2                       # 分流决策窗口（rendezvous 前 k 候选）
+  metric_name: gpu_cache_usage_perc  # 副本 KV 指标名（vLLM 缺省；SGLang 按需替换）
+  cap_scale: false               # 负载上限按 KV 余量缩放（默认关）
 backends:
   - name: vllm-a
     base_url: http://127.0.0.1:8001   # 不含 /v1，路由层原样透传 /v1/* 路径
@@ -133,6 +139,8 @@ python tools/load_test.py http://127.0.0.1:8080 degraded 10 3 5 e1 0.2
   - 重试率：`rate(router_retries_total[1m])` 持续偏高 → 有副本半病态（探活未到阈值但请求失败），检查该副本 GPU/进程状态
   - 前缀树命中率：`router_prefix_match_ratio` → 混合前缀树的有效性自证；走 `X-Session-Id` 快路径的流量不计数
   - 树规模：`router_prefix_tree_nodes` 接近 `max_tree_size` → 驱逐压力偏高，调大上限或检查会话基数
+  - KV 水位：`router_backend_kv_util` 任一副本持续 > 0.9 → KV 容量瓶颈（粘性收益上限），扩显存/降并发
+  - 分流量：`rate(router_kv_steered_total[1m])` 持续偏高 → 有副本长期高水位，检查其 KV 容量与会话分布
 - `/statusz` 适合接入存活探针与发布检查。
 
 ## 7. 生产部署检查清单
@@ -141,6 +149,7 @@ python tools/load_test.py http://127.0.0.1:8080 degraded 10 3 5 e1 0.2
 - [ ] 客户端统一携带 `X-Session-Id`（比 messages 前缀提取更稳定，且省一次 body 解析）
 - [ ] Prometheus 抓取 `:8080/metrics`：`router_affinity_sticky_ratio < 0.9` 告警（检查会话 key 约定）；`router_affinity_overload_fallback_total` 持续增长 → 调大 `alpha` 或扩副本
 - [ ] 混合前缀树监控：`router_prefix_tree_nodes` 设上限告警；`router_prefix_match_ratio` 随会话基数下滑 → 调大 `max_tree_size` 或 `chunk_chars`
+- [ ] KV 分流：副本 KV 指标名与引擎对齐（vLLM `gpu_cache_usage_perc` / SGLang 对应指标 → `kv.metric_name`）；`router_backend_kv_util > 0.9` 告警
 - [ ] 副本 KV 容量核算：`gpu-memory-utilization × 显存 - 模型权重` 折算 token 容量，会话前缀总需求超容量时 LRU 驱逐会稀释粘性收益（见 README 实测数据）
 - [ ] systemd/Kubernetes 托管静态二进制（约 1 vCPU / 64MB），配 liveness probe 打 `/statusz`、readiness probe 打 `/readyz`
 - [ ] 滚动更新副本时 rendezvous 只迁移 1/n 会话，无需路由层重启

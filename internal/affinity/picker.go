@@ -120,12 +120,17 @@ func shortHash(s string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Picker = 加权 rendezvous 排序 + bounded load 兜底 + 混合前缀树（可选）。
+// Picker = 加权 rendezvous 排序 + bounded load 兜底 + 混合前缀树（可选）+ KV 容量感知（可选）。
 type Picker struct {
 	Alpha float64 // 负载上限系数：cap = ceil(alpha × 平均在途)。1.25 为论文推荐区间
 
 	Tree          *Tree   // 混合前缀树；nil = affinity-only（不启用树）
 	TreeThreshold float64 // 树命中判定比例：匹配深度/链长 ≥ 阈值才沿用树记录副本
+
+	KVSteering  bool    // KV 高水位分流开关（AttachKV 启用）
+	KVWatermark float64 // KV 高水位阈值：超过则 top-k 内优先派给余量大者
+	KVTopK      int     // 分流决策窗口：rendezvous 前 k 个候选内比较
+	KVCapScale  bool    // 负载上限按 KV 余量缩放（可选，默认关）
 
 	track *tracker
 }
@@ -144,6 +149,21 @@ func (p *Picker) AttachTree(tree *Tree, cacheThreshold float64) {
 	}
 	p.Tree = tree
 	p.TreeThreshold = cacheThreshold
+}
+
+// AttachKV 启用 KV 容量感知分流（M5）：rendezvous top-k 内，首选副本 KV 超过高水位时
+// 改派余量最大的未过载候选；cap_scale 开启时负载上限按 KV 余量缩放。
+func (p *Picker) AttachKV(highWatermark float64, topK int, capScale bool) {
+	if highWatermark <= 0 || highWatermark >= 1 {
+		highWatermark = 0.9
+	}
+	if topK < 2 {
+		topK = 2
+	}
+	p.KVSteering = true
+	p.KVWatermark = highWatermark
+	p.KVTopK = topK
+	p.KVCapScale = capScale
 }
 
 // TreeActive 报告混合前缀树是否启用。
@@ -175,10 +195,12 @@ func (p *Picker) Rank(key string, candidates []*registry.State) []*registry.Stat
 }
 
 // capFor 计算 name 在当前候选集下的负载上限：
-// cap_i = ceil(α × Σinflight × w_i / Σw)，等权时退化为 α × 平均在途。
+// cap_i = ceil(α × Σinflight × w_i / Σw)，等权时退化为 α × 平均在途；
+// cap_scale 开启时再按 KV 余量缩放：cap_i × (1 − kv_util_i)。
 func (p *Picker) capFor(name string, candidates []*registry.State) int64 {
 	var total, sumW, w int64
 	w = 1
+	var st *registry.State
 	for _, s := range candidates {
 		total += s.InFlight()
 		weight := s.Weight
@@ -188,12 +210,18 @@ func (p *Picker) capFor(name string, candidates []*registry.State) int64 {
 		sumW += int64(weight)
 		if s.Name == name {
 			w = int64(weight)
+			st = s
 		}
 	}
 	if sumW <= 0 {
 		sumW = 1
 	}
 	cap := int64(math.Ceil(p.Alpha * float64(total) * float64(w) / float64(sumW)))
+	if p.KVCapScale && st != nil {
+		if u := st.KVUtil(); u > 0 {
+			cap = int64(math.Ceil(float64(cap) * (1 - u)))
+		}
+	}
 	if cap < 1 { // 空闲集群边界：avg=0 时 cap=0 会让所有副本"过载"，退化为固定首节点
 		cap = 1
 	}
@@ -244,6 +272,25 @@ func (p *Picker) pickRanked(key string, candidates []*registry.State) *registry.
 		}
 	} else if chosen.Name != ordered[0] {
 		metrics.AffinityOverloadFallback.Inc()
+	} else if p.KVSteering && byName[ordered[0]].KVUtil() > p.KVWatermark {
+		// KV 容量感知（M5）：首选副本超 KV 高水位时，在 top-k 窗口内
+		// 改派 KV 余量最大的未过载候选（高水位副本粘性收益已被 LRU 驱逐吃掉）
+		k := p.KVTopK
+		if k > len(ordered) {
+			k = len(ordered)
+		}
+		best, bestUtil := ordered[0], byName[ordered[0]].KVUtil()
+		for _, name := range ordered[1:k] {
+			s := byName[name]
+			u := s.KVUtil()
+			if u < bestUtil && s.InFlight() < p.capFor(name, candidates) {
+				best, bestUtil = name, u
+			}
+		}
+		if best != ordered[0] {
+			chosen = byName[best]
+			metrics.KVSteered.Inc()
+		}
 	}
 	return chosen
 }
@@ -282,6 +329,10 @@ func (p *Picker) PickHybrid(model, key string, chain []string, candidates []*reg
 	if hit != "" && ratio >= p.TreeThreshold {
 		for _, s := range candidates {
 			if s.Name == hit {
+				if p.KVSteering && s.KVUtil() > p.KVWatermark {
+					// 命中副本 KV 高水位：继续沿用只会加剧 LRU 驱逐，转入派单分流
+					break
+				}
 				if p.underCap(s, candidates) { // bounded load 叠加：命中副本不超限才沿用
 					p.track.observe(key, s.Name)
 					metrics.AffinityAssign.WithLabelValues(s.Name).Inc()
@@ -291,7 +342,7 @@ func (p *Picker) PickHybrid(model, key string, chain []string, candidates []*reg
 				break
 			}
 		}
-		// 命中副本已不在健康池（或过载）→ 走派单
+		// 命中副本已不在健康池 / 过载 / KV 高水位 → 走派单
 	}
 	st := p.pickRanked(DispatchKey(chain, d), candidates)
 	if st == nil {

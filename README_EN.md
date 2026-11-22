@@ -17,6 +17,7 @@ infer-router does one thing: **route OpenAI-compatible requests (including SSE s
   - **Bounded load** (α=1.25): when the preferred replica's in-flight count exceeds its cap, overflow goes to the next-best replica — stickiness and balance at the same time
   - **Sticky tracker**: sliding-window ratio of repeated session requests landing on the same replica, exported as `router_affinity_sticky_ratio`
   - **Hybrid prefix tree**: session-less requests are approximately matched on per-model radix trees keyed by the normalized, chunked hash chain of `messages`; on a hit (match ratio ≥ cache_threshold) the tree-recorded replica is reused with bounded load still applied, on a miss dispatch is deterministic over the matched prefix. A global node cap (`max_tree_size`) plus periodic LRU eviction bound memory. Conversations sharing a long prefix (e.g. the same system prompt) concentrate on the replica holding that prefix for better KV reuse — mock run with 30 shared-system conversations: tree mode 30/30 on one replica vs 16/14 spread in affinity-only mode
+  - **KV-capacity-aware steering**: probes also scrape each replica's `/metrics` for KV usage (`router_backend_kv_util{backend}`, metric name configurable); when the top rendezvous candidate exceeds `kv.high_watermark` (default 0.9) within the top-k window, the request goes to the candidate with the most KV headroom (tree hits included), avoiding requests piling onto a replica that is actively evicting. Optional `kv.cap_scale` shrinks load caps by KV headroom (off by default). Below the watermark behavior is identical to the baseline
   - Three-stage session resolution: `X-Session-Id` fast path → prefix-tree approximate match → deterministic prefix dispatch (session key still prefers the `X-Session-Id` header, else the messages prefix — stable across turns)
 - **Strategies**: `round_robin | least_queue | prefix_affinity`
 - **Health probing + breaker**: periodic probes evict dead replicas; request-level fail_threshold breaker with cooldown half-open probing; **error classification** — 5xx/connection errors count as breaker failures, 4xx do not (404+model lands in `router_model_mismatch_total`, surfacing serving-state drift between replica declaration and reality)
@@ -98,6 +99,11 @@ affinity:
     eviction_interval_s: 60     # periodic eviction
     cache_threshold: 0.5        # tree hit ratio (matched depth / chain length)
     chunk_chars: 256            # normalization chunk granularity (runes)
+kv:                             # KV-capacity-aware steering (on by default, triggers only at high watermark)
+  high_watermark: 0.9           # steer away when the top candidate exceeds this
+  top_k: 2                      # steering decision window (top-k rendezvous candidates)
+  metric_name: gpu_cache_usage_perc  # engine KV metric name (vLLM default; adjust for SGLang)
+  cap_scale: false              # scale load caps by KV headroom (off by default)
 backends:
   - { name: vllm-a, base_url: "http://vllm-a.svc:8001", model: qwen2.5-1.5b, weight: 2 }
   - { name: vllm-b, base_url: "http://vllm-b.svc:8001", model: qwen2.5-1.5b, weight: 1 }
