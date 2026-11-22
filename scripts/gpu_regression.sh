@@ -57,8 +57,8 @@ upload_one(){ local f=$1 name; name=$(basename "$f"); local url=""
 start_vllm(){ # start_vllm <pidfile> <port> <util> <modellen> <model-path-or-name> [extra...]
   local pidf=$1 port=$2 util=$3 mlen=$4; shift 4
   nohup $PY -m vllm.entrypoints.openai.api_server \
-    --model "$5" --served-model-name "$MODEL_DECL" --port "$port" --gpu-memory-utilization "$util" --max-model-len "$mlen" \
-    "${@:6}" >> "$R/vllm-$port.log" 2>&1 &
+    --model "$1" --served-model-name "$MODEL_DECL" --port "$port" --gpu-memory-utilization "$util" --max-model-len "$mlen" \
+    "${@:2}" >> "$R/vllm-$port.log" 2>&1 &
   echo $! > "$pidf"
 }
 stop_vllm(){ local pidf=$1 port=$2; [ -f "$pidf" ] || return 0
@@ -75,7 +75,7 @@ health_interval_s: 3
 breaker: { fail_threshold: 3, cooldown_s: 15 }
 retry: { enabled: true, max: 1 }
 affinity: { alpha: 1.25, sticky_window: 4096 }
-kv: { enabled: true, high_watermark: 0.9, top_k: 2, metric_name: gpu_cache_usage_perc, cap_scale: false }
+kv: { enabled: true, high_watermark: 0.9, top_k: 2, metric_name: vllm:gpu_cache_usage_perc, cap_scale: false }
 backends:
   - name: vllm-a
     base_url: http://$A
@@ -217,7 +217,7 @@ $PY "$LOADER" "http://$A" s4_flood 120 4 8 f1 0 > "$R/s4_flood.json" 2>&1 &
 FLOODPID=$!
 UTIL_A_VAL=0
 for _ in $(seq 1 60); do
-  UTIL_A_VAL=$(curl -s "http://$A/metrics" | grep -E '^gpu_cache_usage_perc( |\{)' | awk '{print $NF}' | head -1)
+  UTIL_A_VAL=$(curl -s "http://$A/metrics" | grep -E '^(vllm:)?gpu_cache_usage_perc( |\{)' | awk '{print $NF}' | head -1)
   say "vllm-a gpu_cache_usage_perc=${UTIL_A_VAL:-0}"
   "$PY" -c "import sys; sys.exit(0 if float('${UTIL_A_VAL:-0}')>=0.90 else 1)" && break
   sleep 10

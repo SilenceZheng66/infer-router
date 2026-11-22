@@ -4,7 +4,7 @@
 set -uo pipefail
 M=/mnt/workspace/m6
 B=/mnt/workspace/infer-router-gpu
-mkdir -p "$B/bundle/tools" "$B/bundle/scripts" "$M/src"
+mkdir -p "$B/bundle/tools" "$B/bundle/scripts" "$B/results" "$M/src"
 mark(){ touch "$M/$1"; }
 log(){ echo "[$(date +%T)] $*" >> "$M/bootstrap.log"; }
 
