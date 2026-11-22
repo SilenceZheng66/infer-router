@@ -65,8 +65,9 @@ stop_vllm(){ local pidf=$1 port=$2; [ -f "$pidf" ] || return 0
   local pid; pid=$(cat "$pidf")
   if kill -0 "$pid" 2>/dev/null; then kill -TERM "$pid" 2>/dev/null || true
     for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    kill -9 "$pid" 2>/dev/null || true
   fi
-  pkill -9 -f "port $port" 2>/dev/null || true; }
+  pkill -9 -P "$pid" 2>/dev/null || true; pkill -9 -f "port $port" 2>/dev/null || true; }
 write_router_cfg(){ local path=$1 declb=$2 extra=$3
   cat > "$path" <<EOF
 addr: ":8080"
@@ -110,6 +111,9 @@ say "=== S0 环境启动 ==="; mark PH_S0
 python3 -c "import vllm" 2>/dev/null && say "vllm import ok" || { say "vllm missing, pip install"; python3 -m pip install -q vllm==0.10.1.1 -i https://pypi.tuna.tsinghua.edu.cn/simple >> "$R/pip.log" 2>&1; }
 chmod +x "$BIN" 2>/dev/null || true
 pkill -f "infer-router-linux" 2>/dev/null || true
+pkill -9 -f "VLLM::EngineCore" 2>/dev/null || true
+pkill -9 -f "spawn_main" 2>/dev/null || true
+sleep 2
 DECL_A="$MODEL_DECL"; DECL_B="$MODEL_DECL"
 write_router_cfg "$WS/cfg-s1.yaml" "$MODEL_DECL" ""
 start_vllm "$R/vllm-a.pid" 8001 "$UTIL_A" 8192 "$MODEL_PATH"; wait_ready "$A"; sleep 45; say "vllm-a settle done, starting vllm-b"
