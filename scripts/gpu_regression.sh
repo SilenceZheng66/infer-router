@@ -135,7 +135,7 @@ mark PH_S1B; CB="$R/s1_cb.txt"; : > "$CB"
 vllm_cache_snap A 8001 "$CB"; vllm_cache_snap B 8002 "$CB"
 $PY "$LOADER" "http://$RT" s1_jitter 40 6 8 s1b 0.3 > "$R/s1_jitter.json"
 vllm_cache_snap A 8001 "$CB"; vllm_cache_snap B 8002 "$CB"
-HIT=$("$PY" "$CMP" "$CB" s1-jitter | grep TOTAL | awk '{print $NF}')
+HIT=$("$PY" "$CMP" "$CB" s1-jitter | grep TOTAL | grep -oE '[0-9]+(\.[0-9]+)?%' | head -1)
 say "jitter hit=$HIT json=$(cat "$R/s1_jitter.json")"
 gate "S1b-jitter-hit>=67.3%" "$("$PY" -c "print(1 if float('${HIT:-0%}'.rstrip('%'))>=67.3 else 0)")" "hit=$HIT"
 
@@ -182,8 +182,8 @@ snap_router "s2_after.txt"
 MISMATCH2=$(awk '/^router_model_mismatch_total/{s+=$NF} END{printf "%.0f", s+0}' "$R/s2_after.txt")
 pool_deltas "$R/s2_before.txt" "$R/s2_after.txt" vllm-a vllm-b vllm-c > "$R/s2_pools.txt"
 cat "$R/s2_pools.txt" | tee -a "$R/run.log"
-TD=$(grep -E "^$( [ "$M2_KIND" = lora ] && echo vllm-b || echo vllm-c): delta" "$R/s2_pools.txt" | awk '{print $3}')
-OA=$(grep -E '^vllm-a: delta' "$R/s2_pools.txt" | awk '{print $3}')
+TD=$(grep -E "^$( [ "$M2_KIND" = lora ] && echo vllm-b || echo vllm-c): delta" "$R/s2_pools.txt" | sed -E 's/.*delta=(-?[0-9]+).*/\1/')
+OA=$(grep -E '^vllm-a: delta' "$R/s2_pools.txt" | sed -E 's/.*delta=(-?[0-9]+).*/\1/')
 gate "S2-zero-cross-pool" "$("$PY" -c "print(1 if abs(float('${TD:-0}')-20)<1 and float('${OA:-0}')==0 and int('${FAIL2}')==0 else 0)")" \
   "kind=$M2_KIND target_delta=$TD other_a=$OA http_fail=$FAIL2 mismatch=$MISMATCH2"
 if [ "$M2_KIND" = "lora" ]; then
@@ -236,8 +236,8 @@ snap_router "s4_after.txt"
 STEERED=$(mval "$R/s4_after.txt" router_kv_steered_total | head -1); STEERED=${STEERED:-0}
 pool_deltas "$R/s4_before.txt" "$R/s4_after.txt" vllm-a vllm-b > "$R/s4_pools.txt"
 cat "$R/s4_pools.txt" | tee -a "$R/run.log"
-AD4=$(grep -E '^vllm-a: delta' "$R/s4_pools.txt" | awk '{print $3}')
-BD4=$(grep -E '^vllm-b: delta' "$R/s4_pools.txt" | awk '{print $3}')
+AD4=$(grep -E '^vllm-a: delta' "$R/s4_pools.txt" | sed -E 's/.*delta=(-?[0-9]+).*/\1/')
+BD4=$(grep -E '^vllm-b: delta' "$R/s4_pools.txt" | sed -E 's/.*delta=(-?[0-9]+).*/\1/')
 say "steer json=$(cat "$R/s4_steer.json")"
 gate "S4-kv-steering" "$("$PY" -c "print(1 if float('${STEERED}')>=1 and float('${BD4:-0}')>float('${AD4:-0}') else 0)")" \
   "kv_util_a=$KV_A2 steered=$STEERED pools_a=$AD4 pools_b=$BD4"
