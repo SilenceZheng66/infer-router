@@ -22,7 +22,19 @@ func hashPair(key, node string) uint64 {
 	_, _ = h.Write([]byte(key))
 	_, _ = h.Write([]byte{0})          // 分隔符，避免 "ab"+"c" 与 "a"+"bc" 撞车
 	_, _ = h.Write([]byte(node))
-	return h.Sum64()
+	// FNV-1a 对"仅末尾单字节不同"的输入雪崩性弱（会系统性偏斜节点胜出率），
+	// 追加 murmur3 fmix64 终态混合，把输出打回均匀分布。
+	return fmix64(h.Sum64())
+}
+
+// fmix64 是 murmur3 的 64 位终态混合器（finalizer），实现强雪崩。
+func fmix64(h uint64) uint64 {
+	h ^= h >> 33
+	h *= 0xff51afd7ed558ccd
+	h ^= h >> 33
+	h *= 0xc4ceb9fe1a85ec53
+	h ^= h >> 33
+	return h
 }
 
 // SortNodes 按 key 的 rendezvous 得分降序返回 node 名单。

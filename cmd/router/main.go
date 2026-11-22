@@ -115,7 +115,7 @@ func main() {
 			if kerr == nil {
 				st = picker.Pick(key, states)
 			} else {
-				st = fallback.Pick(states) // key 不可提取：退化为 RR
+				st = bal.Pick(states) // key 不可提取：退化为 RR
 			}
 			if st == nil {
 				http.Error(w, `{"error":{"message":"no healthy backend"}}`, http.StatusBadGateway)

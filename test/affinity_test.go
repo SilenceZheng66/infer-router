@@ -32,7 +32,7 @@ func chatBody(system, firstUser string) []byte {
 // ---- SessionKey ----
 
 func TestSessionKeyPrefersHeader(t *testing.T) {
-	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatBody("s", "u1")))
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(chatBody("s", "u1"))))
 	r.Header.Set("X-Session-Id", "abc-123")
 	key, err := affinity.SessionKey(r, chatBody("s", "u1"))
 	if err != nil {

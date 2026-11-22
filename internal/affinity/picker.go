@@ -127,6 +127,9 @@ func (p *Picker) Pick(key string, candidates []*registry.State) *registry.State 
 		total += s.InFlight()
 	}
 	cap := int64(math.Ceil(p.Alpha * float64(total) / float64(len(candidates))))
+	if cap < 1 { // 空闲集群边界：avg=0 时 cap=0 会让所有副本"过载"，退化为固定首节点
+		cap = 1
+	}
 
 	var chosen *registry.State
 	for _, name := range ordered {
@@ -178,8 +181,10 @@ func newTracker(window int) *tracker {
 func (t *tracker) observe(key, backend string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.total++
+	// 首见 key 不计入分母：粘性率衡量"已有会话的保持率"，首见无粘/漂可言，
+	// 否则指标被 (轮数-1)/轮数 系统性稀释，失去可观测意义。
 	if last, ok := t.window[key]; ok {
+		t.total++
 		if last == backend {
 			t.hits++
 		} else {
@@ -194,7 +199,7 @@ func (t *tracker) observe(key, backend string) {
 			delete(t.window, evict)
 		}
 	}
-	if t.total > 10*t.cap { // 窗口滑动：统计量按指数衰减重置
+	if t.total > 10*int64(t.cap) { // 窗口滑动：统计量按指数衰减重置
 		t.hits /= 2
 		t.total /= 2
 	}
