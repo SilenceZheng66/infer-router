@@ -24,6 +24,7 @@ import (
 	"infer-router/internal/affinity"
 	"infer-router/internal/balancer"
 	"infer-router/internal/metrics"
+	"infer-router/internal/pd"
 	"infer-router/internal/proxy"
 	"infer-router/internal/registry"
 )
@@ -81,6 +82,7 @@ type Config struct {
 	Affinity          AffinityCfg        `yaml:"affinity"`
 	Retry             RetryCfg           `yaml:"retry"`
 	KV                KVCfg              `yaml:"kv"`
+	PD                pd.Cfg             `yaml:"pd"` // PD 分离（M7）：mode 为空 = 关闭
 	Backends          []registry.Backend `yaml:"backends"`
 }
 
@@ -132,6 +134,52 @@ func applyDefaults(cfg *Config) {
 	if cfg.KV.MetricName == "" {
 		cfg.KV.MetricName = "gpu_cache_usage_perc"
 	}
+	if cfg.PD.Mode != "" {
+		cfg.PD.Mode = strings.ToLower(strings.TrimSpace(cfg.PD.Mode))
+		if cfg.PD.ThresholdTok <= 0 {
+			cfg.PD.ThresholdTok = 256 // inline/分离路径的默认 token 阈值
+		}
+		if cfg.PD.RemoteTPSize <= 0 {
+			cfg.PD.RemoteTPSize = 1
+		}
+	}
+}
+
+// validatePD 校验 PD 配置与 backends 角色声明的一致性（Swap 前调用，失败回滚不动运行态）。
+func validatePD(cfg *Config) error {
+	switch cfg.PD.Mode {
+	case "", pd.ModeSglang, pd.ModeVllm:
+	default:
+		return fmt.Errorf("pd.mode %q 不支持（允许：空/sglang/vllm）", cfg.PD.Mode)
+	}
+	if cfg.PD.Mode == "" {
+		for _, b := range cfg.Backends {
+			if b.Role != "" {
+				return fmt.Errorf("backend %q 配置了 role=%q 但未启用 pd.mode（移除 role 或配置 pd.mode）", b.Name, b.Role)
+			}
+			if b.BootstrapPort != 0 || b.BootstrapHost != "" {
+				return fmt.Errorf("backend %q 配置了 bootstrap_* 但未启用 pd.mode", b.Name)
+			}
+		}
+		return nil
+	}
+	pf, dd := 0, 0
+	for _, b := range cfg.Backends {
+		switch b.Role {
+		case "prefill":
+			pf++
+		case "decode":
+			dd++
+		case "":
+			return fmt.Errorf("pd.mode 启用时 backend %q 必须声明 role=prefill|decode", b.Name)
+		default:
+			return fmt.Errorf("backend %q 的 role=%q 非法（prefill|decode）", b.Name, b.Role)
+		}
+	}
+	if pf == 0 || dd == 0 {
+		return fmt.Errorf("pd.mode=%s 需要 ≥1 个 prefill 与 ≥1 个 decode 副本（当前 prefill=%d decode=%d）", cfg.PD.Mode, pf, dd)
+	}
+	return nil
 }
 
 // resolvedRetry 把指针形态的 RetryCfg 解析为 proxy 层的具体配置（缺省全开、max=1）。
@@ -207,6 +255,9 @@ func buildComponents(cfg *Config) (*registry.Registry, balancer.Balancer, *affin
 // 若探活循环此前在运行，则对新 registry 自动重启，新副本即刻纳入探测。
 func (rt *Runtime) Swap(cfg *Config) error {
 	applyDefaults(cfg)
+	if err := validatePD(cfg); err != nil {
+		return err // 组件未动，运行态保持不变（回滚语义）
+	}
 	reg, bal, picker := buildComponents(cfg)
 
 	rt.mu.Lock()
@@ -267,10 +318,13 @@ func (rt *Runtime) StartProbes(interval time.Duration) {
 }
 
 // Build 按策略装配 Runtime 与 HTTP handler。
-// 无论配置来自 LoadConfig 还是直接构造（集成测试），这里统一补齐默认值（幂等）。
+// 无论配置来自 LoadConfig 还是直接构造（集成测试），这里统一补齐默认值（幂等）；
+// 配置非法（PD 角色声明不一致等）时 panic——程序化构造方应当在构建前自校验。
 func Build(cfg *Config) (*Runtime, http.Handler) {
 	rt := &Runtime{}
-	_ = rt.Swap(cfg) // Swap 无失败路径（组件构建不产生错误），默认值在此幂等补齐
+	if err := rt.Swap(cfg); err != nil {
+		panic(fmt.Sprintf("infer-router: invalid config: %v", err))
+	}
 	return rt, Handler(rt)
 }
 
@@ -289,13 +343,30 @@ func Handler(rt *Runtime) http.Handler {
 		if picker != nil && picker.TreeActive() {
 			out["prefix_tree_nodes"] = picker.Tree.Nodes()
 		}
+		if cfg.PD.Mode != "" { // PD 池维度观测（M7）
+			healthy := reg.Healthy()
+			out["pd_mode"] = cfg.PD.Mode
+			out["prefill_healthy"] = countRole(healthy, "prefill")
+			out["decode_healthy"] = countRole(healthy, "decode")
+		}
 		_ = json.NewEncoder(w).Encode(out)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		_, reg, _, _, _ := rt.snapshot()
+		cfg, reg, _, _, _ := rt.snapshot()
 		w.Header().Set("Content-Type", "application/json")
+		healthy := reg.Healthy()
 		// 进程存活由 K8s liveness（/statusz 或进程本身）判断；/readyz 回答"是否可接流量"
-		if n := len(reg.Healthy()); n == 0 {
+		if cfg.PD.Mode != "" { // PD 双池语义：P、D 池各 ≥1 健康副本才可接流量
+			pf, dd := countRole(healthy, "prefill"), countRole(healthy, "decode")
+			if pf == 0 || dd == 0 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = fmt.Fprintf(w, `{"ready":false,"prefill_healthy":%d,"decode_healthy":%d}`, pf, dd)
+				return
+			}
+			_, _ = fmt.Fprint(w, `{"ready":true}`)
+			return
+		}
+		if n := len(healthy); n == 0 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = fmt.Fprint(w, `{"ready":false,"healthy_backends":0}`)
 			return
@@ -312,16 +383,23 @@ func (rt *Runtime) handleV1(w http.ResponseWriter, r *http.Request) {
 	cfg, reg, bal, picker, retry := rt.snapshot()
 	states := reg.Healthy()
 
-	// 亲和路径：读 body 提取会话 key 与 model，转发时重放 body
-	if picker != nil {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-		if err != nil {
-			http.Error(w, "read body", http.StatusBadRequest)
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(body)) // 兜底：非 chat 路径仍可转发
-		key, model, chain, kerr := affinity.ParseRequestChain(r, body, cfg.Affinity.Tree.ChunkChars)
+	// 读 body 并解析 (会话 key, model, 前缀链)：PD / 亲和 / RR 三条路径共用
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	key, model, chain, kerr := affinity.ParseRequestChain(r, body, cfg.Affinity.Tree.ChunkChars)
 
+	// PD 分离路径（M7）：pd.mode 启用时接管路由
+	if cfg.PD.Mode != "" {
+		rt.handlePD(w, r, cfg, states, bal, picker, retry, body, key, model, chain)
+		return
+	}
+
+	// 亲和路径：树命中 → 前缀派单 → 全链派单，bounded load 兜底
+	if picker != nil {
 		candidates, ok := filterByModel(w, states, model)
 		if !ok {
 			return // 已写出 502
@@ -332,13 +410,11 @@ func (rt *Runtime) handleV1(w http.ResponseWriter, r *http.Request) {
 		if kerr == nil {
 			ck := compositeKey(model, key)
 			if picker.TreeActive() && len(chain) > 0 {
-				// 混合前缀树：sid 快路径外的请求走 树命中 → 前缀派单 → 全链派单
 				st = picker.PickHybrid(model, ck, chain, candidates)
 			} else {
 				st = picker.Pick(ck, candidates)
 			}
 			if st != nil {
-				// failover 次序：bounded load 主选 + 加权 rendezvous 次序的其余副本
 				ranked = []*registry.State{st}
 				for _, s := range picker.Rank(ck, candidates) {
 					if s.Name != st.Name {
@@ -359,9 +435,6 @@ func (rt *Runtime) handleV1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// RR / least_queue 路径：同样按 model 筛池（重试仅限亲和路径，RR 次序无"次优"语义）
-	body, _ := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	_, model, _ := affinity.ParseRequest(r, body)
 	candidates, ok := filterByModel(w, states, model)
 	if !ok {
 		return
@@ -372,6 +445,145 @@ func (rt *Runtime) handleV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proxy.Serve(w, r, st)
+}
+
+// handlePD PD 分离路由（M7）：
+//   - inline（短请求，估算 token < pd.path_threshold_prompt_tokens）：直连 D 池端到端服务；
+//   - disagg（长请求）：按 pd.mode 选 (P, D) 副本对——
+//     sglang：请求发 P 池并注入 bootstrap 三元组（每次重试尝试重新生成 room）；
+//     vllm：两段编排（P 池 max_tokens=1 拿 kv_transfer_params → D 池最终响应）。
+func (rt *Runtime) handlePD(w http.ResponseWriter, r *http.Request, cfg *Config, states []*registry.State,
+	bal balancer.Balancer, picker *affinity.Picker, retry proxy.RetryConfig,
+	body []byte, key, model string, chain []string) {
+
+	prefill, decode := pdPools(states, model)
+	if len(decode) == 0 {
+		metrics.ModelNoMatch.WithLabelValues(model).Inc()
+		http.Error(w, `{"error":{"message":"no healthy decode backend"}}`, http.StatusBadGateway)
+		return
+	}
+
+	for k, v := range cfg.PD.InjectHeaders {
+		r.Header.Set(k, v)
+	}
+
+	inline := affinity.EstimatePromptTokens(body) < cfg.PD.ThresholdTok
+	if inline {
+		metrics.PdPath.WithLabelValues("inline").Inc()
+		st, ranked := rankIn("decode", model, key, chain, decode, bal, picker)
+		if st == nil {
+			http.Error(w, `{"error":{"message":"no healthy decode backend"}}`, http.StatusBadGateway)
+			return
+		}
+		proxy.ServeWithFailover(w, r, ranked, body, model, retry)
+		return
+	}
+	metrics.PdPath.WithLabelValues("disagg").Inc()
+
+	if len(prefill) == 0 {
+		http.Error(w, `{"error":{"message":"no healthy prefill backend"}}`, http.StatusBadGateway)
+		return
+	}
+
+	switch cfg.PD.Mode {
+	case pd.ModeSglang:
+		p, pranked := rankIn("prefill", model, key, chain, prefill, bal, picker)
+		d, _ := rankIn("decode", model, key, chain, decode, bal, picker)
+		if p == nil || d == nil {
+			http.Error(w, `{"error":{"message":"no healthy pd backend"}}`, http.StatusBadGateway)
+			return
+		}
+		metrics.PdPair.WithLabelValues(p.Name, d.Name).Inc()
+		// bootstrap 注入每次尝试重新生成 room：失败 attempt 的 room 不复用，避免污染引擎侧状态
+		mut := func(_ int, b []byte) []byte {
+			nb, err := pd.InjectSglang(b, pd.Bootstrap{
+				Host: pd.BootstrapHost(d),
+				Port: pd.BootstrapPort(d, cfg.PD.BootstrapPort),
+				Room: pd.NextRoom(),
+			})
+			if err != nil {
+				return b // body 已预校验为 JSON object，兜底原样转发
+			}
+			return nb
+		}
+		proxy.ServeWithFailover(w, r, pranked, body, model, retry, mut)
+	case pd.ModeVllm:
+		_, pranked := rankIn("prefill", model, key, chain, prefill, bal, picker)
+		d, _ := rankIn("decode", model, key, chain, decode, bal, picker)
+		if d == nil || len(pranked) == 0 {
+			http.Error(w, `{"error":{"message":"no healthy pd backend"}}`, http.StatusBadGateway)
+			return
+		}
+		pd.ServeVllm(w, r, pranked, d, body, model, retry, cfg.PD)
+	default: // validatePD 已拦截非法 mode，防御性兜底
+		http.Error(w, `{"error":{"message":"unsupported pd.mode"}}`, http.StatusInternalServerError)
+	}
+}
+
+// rankIn 在指定 PD 池内选主选副本并给出 failover 次序。
+// picker 存在时复用亲和/树/KV 分流机制；树命名空间以 model#role 隔离，
+// 避免 P/D 两池对同一 (model, chain) 的树记录互相污染。
+func rankIn(role, model, key string, chain []string, cands []*registry.State,
+	bal balancer.Balancer, picker *affinity.Picker) (*registry.State, []*registry.State) {
+	if len(cands) == 0 {
+		return nil, nil
+	}
+	ck := compositeKey(model, key)
+	treeModel := model + "#" + role
+	var st *registry.State
+	if picker != nil {
+		if picker.TreeActive() && len(chain) > 0 {
+			st = picker.PickHybrid(treeModel, ck, chain, cands)
+		} else {
+			st = picker.Pick(ck, cands)
+		}
+	} else {
+		st = bal.Pick(cands)
+	}
+	if st == nil {
+		return nil, nil
+	}
+	ranked := []*registry.State{st}
+	if picker != nil {
+		for _, s := range picker.Rank(ck, cands) {
+			if s.Name != st.Name {
+				ranked = append(ranked, s)
+			}
+		}
+	} else {
+		for _, s := range cands {
+			if s.Name != st.Name {
+				ranked = append(ranked, s)
+			}
+		}
+	}
+	return st, ranked
+}
+
+// pdPools 从健康副本中按 PD 角色筛池（同时按 model 过滤）。
+func pdPools(states []*registry.State, model string) (prefill, decode []*registry.State) {
+	for _, s := range states {
+		if !s.Serves(model) {
+			continue
+		}
+		switch s.Role {
+		case "prefill":
+			prefill = append(prefill, s)
+		case "decode":
+			decode = append(decode, s)
+		}
+	}
+	return prefill, decode
+}
+
+func countRole(states []*registry.State, role string) int {
+	n := 0
+	for _, s := range states {
+		if s.Role == role {
+			n++
+		}
+	}
+	return n
 }
 
 func singleOrEmpty(st *registry.State) []*registry.State {

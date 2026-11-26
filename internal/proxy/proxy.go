@@ -33,6 +33,10 @@ func (r *recorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// BodyMutator 每次转发尝试前对 body 做增量修改（PD 场景每次重试重新生成 bootstrap_room）。
+// attempt 从 0 开始；返回新 body（可原样返回入参表示不改写）。
+type BodyMutator func(attempt int, body []byte) []byte
+
 // Serve 将请求透传到指定副本（支持 SSE：FlushInterval=-1 逐块 flush）。
 func Serve(w http.ResponseWriter, req *http.Request, state *registry.State) {
 	ServeWithFailover(w, req, []*registry.State{state}, nil, "", RetryConfig{Enabled: false})
@@ -47,7 +51,8 @@ func ServeWithBody(w http.ResponseWriter, req *http.Request, state *registry.Sta
 // ServeWithFailover 带请求级 failover 的透传。
 // ranked 为按优先级排序的候选副本（ranked[0] 为主选，其余为重试次序）；model 用于 404 mismatch 归因（可为空）。
 // body 为请求体缓冲（重试需要重放）；nil 时仅首选拿原始流、不做重试。
-func ServeWithFailover(w http.ResponseWriter, req *http.Request, ranked []*registry.State, body []byte, model string, retry RetryConfig) {
+// muts 为每次尝试前的 body 变异器（按次序叠加，PD bootstrap 注入用）。
+func ServeWithFailover(w http.ResponseWriter, req *http.Request, ranked []*registry.State, body []byte, model string, retry RetryConfig, muts ...BodyMutator) {
 	if len(ranked) == 0 {
 		http.Error(w, "no healthy backend", http.StatusBadGateway)
 		return
@@ -75,6 +80,7 @@ func ServeWithFailover(w http.ResponseWriter, req *http.Request, ranked []*regis
 		body:   body,
 		retry:  retry,
 		max:    maxAttempts,
+		muts:   muts,
 	}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -129,6 +135,7 @@ type retryRoundTripper struct {
 	body   []byte
 	retry  RetryConfig
 	max    int
+	muts   []BodyMutator
 
 	served *registry.State // 实际产出最终响应的副本（成功响应或最后一次失败）
 }
@@ -147,10 +154,14 @@ func (t *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		u.Host = target.Host
 		req2.URL = &u
 		req2.Host = u.Host
-		// 重放 body：有缓冲时每次尝试都用新 reader；无缓冲且非首次尝试则不可重试
-		if len(t.body) > 0 {
-			req2.Body = io.NopCloser(bytes.NewReader(t.body))
-			req2.ContentLength = int64(len(t.body))
+		// 重放 body：有缓冲时每次尝试都用新 reader（先过变异器）；无缓冲且非首次尝试则不可重试
+		b := t.body
+		for _, m := range t.muts {
+			b = m(idx, b)
+		}
+		if len(b) > 0 {
+			req2.Body = io.NopCloser(bytes.NewReader(b))
+			req2.ContentLength = int64(len(b))
 		} else if idx > 0 && req.Body != nil {
 			break
 		}

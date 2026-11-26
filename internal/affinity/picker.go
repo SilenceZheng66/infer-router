@@ -114,6 +114,28 @@ func contentString(v any) string {
 	}
 }
 
+// EstimatePromptTokens 以"字符数/4"粗估 prompt token 量（PD inline/分离路径决策用）。
+// 与真实 tokenizer 有 ±30% 级误差，足以判定长/短请求；非 chat 结构退化为 body 规模粗估。
+func EstimatePromptTokens(body []byte) int {
+	var payload struct {
+		Messages []struct {
+			Content any `json:"content"`
+		} `json:"messages"`
+		Prompt string `json:"prompt"`
+	}
+	chars := 0
+	if json.Unmarshal(body, &payload) == nil {
+		for _, m := range payload.Messages {
+			chars += len(contentString(m.Content))
+		}
+		chars += len(payload.Prompt)
+	}
+	if chars == 0 {
+		chars = len(body) / 3 // 兜底：非标准结构按 body 规模粗估
+	}
+	return (chars + 3) / 4
+}
+
 func shortHash(s string) string {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(s))

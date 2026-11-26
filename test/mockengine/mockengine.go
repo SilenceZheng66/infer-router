@@ -4,6 +4,7 @@
 package mockengine
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,9 @@ type Options struct {
 	Models    []string // 该副本服务的模型清单（/v1/models 返回）
 	StatusSeq []int    // 对 chat/completions 依次返回的状态码；耗尽后恒 200（如 [500,500,200]）
 	LatencyMs int      // 每次响应固定延迟
+	// ExtraResponseFields 追加进 chat 200 响应 JSON 顶层字段（PD 场景模拟
+	// prefill 返回 kv_transfer_params）。
+	ExtraResponseFields map[string]any
 }
 
 // Engine 一个 mock 引擎实例（对应 httptest.Server）。
@@ -39,6 +43,8 @@ type Engine struct {
 
 	requests atomic.Int64
 	lastBody atomic.Value // string，最后一次 chat 请求体（调试/断言用）
+
+	extra atomic.Value // map[string]any，追加进 chat 200 响应的顶层字段
 }
 
 // New 启动一个 mock 引擎。
@@ -91,6 +97,9 @@ func (e *Engine) SetKVUsage(v float64) { e.kvUsage.Store(v) }
 // SetAbortAfter 设置 chat 响应写出后强制断开（模拟 SSE 流式中途失败）；0 关闭。
 func (e *Engine) SetAbortAfter(n int64) { e.abortAfter.Store(n) }
 
+// SetExtraResponseFields 运行中设置追加进 chat 200 响应的顶层字段。
+func (e *Engine) SetExtraResponseFields(extra map[string]any) { e.extra.Store(extra) }
+
 func (e *Engine) handleModels(w http.ResponseWriter, _ *http.Request) {
 	var sb strings.Builder
 	for _, m := range e.models {
@@ -136,7 +145,13 @@ func (e *Engine) handleChat(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"id":"mock-1","object":"chat.completion","model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":"%s-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`, e.models[0], e.Name)
+	resp := fmt.Sprintf(`{"id":"mock-1","object":"chat.completion","model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":"%s-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`, e.models[0], e.Name)
+	if extra, ok := e.extra.Load().(map[string]any); ok && len(extra) > 0 {
+		if eb, err := json.Marshal(extra); err == nil {
+			resp = resp[:len(resp)-1] + "," + string(eb) + "}"
+		}
+	}
+	fmt.Fprint(w, resp)
 }
 
 func (e *Engine) handlePassthrough(w http.ResponseWriter, _ *http.Request) {

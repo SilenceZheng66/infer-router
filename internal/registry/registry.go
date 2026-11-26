@@ -18,6 +18,13 @@ type Backend struct {
 	BaseURL string `yaml:"base_url" json:"base_url"` // 不含 /v1
 	Model   string `yaml:"model" json:"model"`       // 该副本服务的模型；支持逗号分隔多模型与 "*" 通配；留空 = 不过滤
 	Weight  int    `yaml:"weight" json:"weight"`     // 亲和排序与负载上限分摊权重（≥1）
+	Role    string `yaml:"role" json:"role"`         // PD 角色（M7）："" | prefill | decode；仅 pd.mode 启用时生效
+	// BootstrapPort 副本角色端口的显式配置：sglang=--disaggregation-bootstrap-port，
+	// vllm=KV connector 握手端口（remote_port）；0 = 按 pd.default_bootstrap_port / base_url 兜底。
+	BootstrapPort int `yaml:"bootstrap_port" json:"bootstrap_port"`
+	// BootstrapHost bootstrap 主机显式覆盖（跨机部署时 prefill 需直达 decode 的可达地址）；
+	// 空 = 从 base_url host 推导。
+	BootstrapHost string `yaml:"bootstrap_host" json:"bootstrap_host"`
 }
 
 // Serves 报告该副本是否服务指定模型。
@@ -180,6 +187,7 @@ func fetchKV(ctx context.Context, client *http.Client, s *State, metric string) 
 	if v, ok := parseMetricValue(string(body), metric); ok {
 		s.SetKVUtil(v)
 		metrics.BackendKVUtil.WithLabelValues(s.Name).Set(v)
+		metrics.PoolKVUtil.WithLabelValues(s.Name, s.Role).Set(v) // PD 池维度观测（M7）
 	}
 }
 

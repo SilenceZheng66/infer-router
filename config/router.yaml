@@ -22,3 +22,50 @@ backends:
     base_url: http://127.0.0.1:8002
     model: qwen2.5-1.5b
     weight: 1
+
+# ---------------------------------------------------------------- PD 分离（M7）
+# pd.mode 为空（或整段省略）= 关闭 PD，全部后端按普通池路由（上方单池配置即默认形态，
+# 向后兼容：单池部署不需要任何改动）。
+#
+# 启用 PD 时 backends 必须全部声明 role=prefill | decode，且两池各 ≥1 副本：
+#
+# pd:
+#   mode: sglang                    # sglang | vllm
+#   path_threshold_prompt_tokens: 256   # 估算 token 低于该值 inline 直连 D 池，≥ 该值走分离路径
+#   default_bootstrap_port: 8998        # decode 副本未配置 bootstrap_port 时的兜底
+#   remote_tp_size: 1                   # vllm 模式 kv_transfer_params.remote_tp_size
+#   inject_headers:                     # 分离请求额外注入的静态头（可选）
+#     X-Router-Trace: pd
+#
+# 各角色的角色端口（bootstrap_port）语义：
+#   sglang: decode 实例 --disaggregation-bootstrap-port 监听端口（SGLang 默认 8998）
+#   vllm:   decode 实例 KV connector 握手端口（kv_transfer_params.remote_port）
+# bootstrap_host：跨机部署时 prefill 直达 decode 的可达地址；留空从 base_url 推导。
+#
+# PD 配置示例（SGLang 1P + 2D，同机单卡 demo 可两进程共享 GPU）：
+#
+# pd:
+#   mode: sglang
+#   path_threshold_prompt_tokens: 256
+# backends:
+#   - name: sg-p
+#     base_url: http://127.0.0.1:30000
+#     model: qwen2.5-1.5b
+#     role: prefill
+#   - name: sg-d0
+#     base_url: http://127.0.0.1:30001
+#     model: qwen2.5-1.5b
+#     role: decode
+#     bootstrap_port: 8998
+#   - name: sg-d1
+#     base_url: http://127.0.0.1:30002
+#     model: qwen2.5-1.5b
+#     role: decode
+#     bootstrap_port: 8999
+#
+# 新增观测指标：
+#   router_pd_path_total{path=inline|disagg}     路径决策计数
+#   router_pd_pair_total{prefill,decode}         分离请求 (P,D) 副本对分布
+#   router_pd_bootstrap_total{result=ok|fail}    bootstrap 注入结果（vllm 取参成败）
+#   router_pool_kv_util{backend,role}            池维度 KV 水位
+# /readyz 双池语义：pd.mode 启用时要求 P、D 池各 ≥1 健康副本才返回 ready。

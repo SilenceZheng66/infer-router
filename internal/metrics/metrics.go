@@ -79,9 +79,34 @@ var KVSteered = prometheus.NewCounter(
 		Help: "Requests diverted from a high-KV-watermark replica to one with more KV headroom"},
 )
 
+// PD 分离观测（M7）：路径决策、(P,D) 副本对、bootstrap 注入结果、池维度 KV 水位。
+var PdPath = prometheus.NewCounterVec(
+	prometheus.CounterOpts{Name: "router_pd_path_total",
+		Help: "PD path decisions: inline (short request, straight to decode pool) vs disagg (prefill+decode)"},
+	[]string{"path"},
+)
+
+var PdPair = prometheus.NewCounterVec(
+	prometheus.CounterOpts{Name: "router_pd_pair_total",
+		Help: "Disaggregated requests by (prefill, decode) replica pair"},
+	[]string{"prefill", "decode"},
+)
+
+var PdBootstrap = prometheus.NewCounterVec(
+	prometheus.CounterOpts{Name: "router_pd_bootstrap_total",
+		Help: "PD bootstrap outcomes: ok (kv_transfer_params obtained / room issued) vs fail"},
+	[]string{"result"},
+)
+
+var PoolKVUtil = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{Name: "router_pool_kv_util",
+		Help: "KV cache usage fraction per backend with its PD role label (prefill/decode/empty)"},
+	[]string{"backend", "role"},
+)
+
 // StickyRatioFn 由 affinity 包注入（避免 metrics -> affinity 反向依赖）。
 var StickyRatioFn = func() float64 { return 1.0 }
 
 func init() {
-	prometheus.MustRegister(ReqTotal, InFlight, AffinitySticky, AffinityAssign, AffinityOverloadFallback, ModelNoMatch, Retries, ModelMismatch, PrefixMatchRatio, PrefixTreeNodes, BackendKVUtil, KVSteered)
+	prometheus.MustRegister(ReqTotal, InFlight, AffinitySticky, AffinityAssign, AffinityOverloadFallback, ModelNoMatch, Retries, ModelMismatch, PrefixMatchRatio, PrefixTreeNodes, BackendKVUtil, KVSteered, PdPath, PdPair, PdBootstrap, PoolKVUtil)
 }
