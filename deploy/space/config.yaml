@@ -1,0 +1,17 @@
+# 创空间部署配置：infer-router → ModelScope API-Inference
+# base_url 约定不含 /v1，路由层原样透传 /v1/* 路径到上游。
+addr: ":7860"
+strategy: round_robin
+health_interval_s: 10
+breaker:
+  fail_threshold: 3
+  cooldown_s: 15
+# 全局静态头注入：所有经路由的上游请求带上网关侧凭证（覆盖客户端同名头）。
+# ${MODELSCOPE_API_TOKEN} 占位由 entrypoint.sh 启动时从 Space Secret 注入。
+inject_headers:
+  Authorization: "Bearer ${MODELSCOPE_API_TOKEN}"
+backends:
+  - name: modelscope-api
+    base_url: https://api-inference.modelscope.cn
+    model: Qwen/Qwen2.5-7B-Instruct
+    weight: 1
