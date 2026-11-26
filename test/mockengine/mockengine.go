@@ -147,8 +147,15 @@ func (e *Engine) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	resp := fmt.Sprintf(`{"id":"mock-1","object":"chat.completion","model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":"%s-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`, e.models[0], e.Name)
 	if extra, ok := e.extra.Load().(map[string]any); ok && len(extra) > 0 {
-		if eb, err := json.Marshal(extra); err == nil {
-			resp = resp[:len(resp)-1] + "," + string(eb) + "}"
+		// 整体重编码追加顶层字段（字符串拼接会破坏 usage 对象后的 JSON 结构）
+		var m map[string]any
+		if json.Unmarshal([]byte(resp), &m) == nil {
+			for k, v := range extra {
+				m[k] = v
+			}
+			if eb, err := json.Marshal(m); err == nil {
+				resp = string(eb)
+			}
 		}
 	}
 	fmt.Fprint(w, resp)

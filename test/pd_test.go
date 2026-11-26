@@ -73,6 +73,7 @@ func buildPDRouter(t *testing.T, mode string, prefillSeq []int) (string, []*mock
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	rt.Reg.ProbeAll(ctx)
+	rt.Reg.Start(ctx, 200*time.Millisecond) // 周期探活：readyz 双池语义依赖探测刷新
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	return srv.URL, engines
@@ -142,19 +143,40 @@ func TestPDSglangDisaggBootstrap(t *testing.T) {
 
 // TestPDSglangPrefillFailover：P 池主选 5xx → 换次优 prefill 重试（重新生成 room），客户端拿到 200。
 func TestPDSglangPrefillFailover(t *testing.T) {
-	router, engines := buildPDRouter(t, pd.ModeSglang, []int{500})
+	// 2P + 1D 专用拓扑：buildPDRouter 只有 1 个 prefill，无法验证 P 池内 failover
+	engP0 := mockengine.New(mockengine.Options{Name: "pd-p0", Models: []string{"m-1"}, StatusSeq: []int{500}})
+	engP1 := mockengine.New(mockengine.Options{Name: "pd-p1", Models: []string{"m-1"}})
+	engD0 := mockengine.New(mockengine.Options{Name: "pd-d0", Models: []string{"m-1"}})
+	t.Cleanup(func() { engP0.Close(); engP1.Close(); engD0.Close() })
 
-	code, resp := pdPostChat(t, router, pdLongBody("m-1"))
-	if code != 200 || !strings.Contains(resp, "pd-p0-ok") {
-		t.Fatalf("code=%d body=%s (want prefill response after failover)", code, resp)
+	cfg := &app.Config{
+		Addr: ":0", Strategy: "round_robin", HealthIntervalSec: 1,
+		Breaker: app.BreakerCfg{FailThreshold: 10, CooldownSec: 1},
+		PD:      pd.Cfg{Mode: pd.ModeSglang},
+		Backends: []registry.Backend{
+			{Name: "pd-p0", BaseURL: engP0.URL(), Model: "m-1", Role: "prefill"},
+			{Name: "pd-p1", BaseURL: engP1.URL(), Model: "m-1", Role: "prefill"},
+			{Name: "pd-d0", BaseURL: engD0.URL(), Model: "m-1", Role: "decode", BootstrapPort: 8998},
+		},
 	}
-	if got := engines[0].Requests(); got != 1 {
+	rt, handler := app.Build(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	rt.Reg.ProbeAll(ctx)
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	code, resp := pdPostChat(t, srv.URL, pdLongBody("m-1"))
+	if code != 200 || !strings.Contains(resp, "pd-p1-ok") {
+		t.Fatalf("code=%d body=%s (want pd-p1 response after failover)", code, resp)
+	}
+	if got := engP0.Requests(); got != 1 {
 		t.Fatalf("pd-p0 attempts = %d, want 1 (failed first try)", got)
 	}
 	var payload struct {
 		BootstrapRoom uint64 `json:"bootstrap_room"`
 	}
-	if err := json.Unmarshal([]byte(engines[0].LastBody()), &payload); err != nil || payload.BootstrapRoom == 0 {
+	if err := json.Unmarshal([]byte(engP1.LastBody()), &payload); err != nil || payload.BootstrapRoom == 0 {
 		t.Fatalf("retry attempt body missing bootstrap_room: %v", err)
 	}
 }
