@@ -78,6 +78,7 @@ type Config struct {
 	Strategy          string             `yaml:"strategy"`
 	HealthIntervalSec int                `yaml:"health_interval_s"`
 	AdminToken        string             `yaml:"admin_token"` // 管理接口令牌；留空 = 仅允许 localhost 调用
+	InjectHeaders     map[string]string  `yaml:"inject_headers" json:"inject_headers"` // 全局静态头注入（所有经路由的上游请求；服务端配置覆盖客户端同名头）
 	Breaker           BreakerCfg         `yaml:"breaker"`
 	Affinity          AffinityCfg        `yaml:"affinity"`
 	Retry             RetryCfg           `yaml:"retry"`
@@ -430,6 +431,7 @@ func (rt *Runtime) handleV1(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":{"message":"no healthy backend"}}`, http.StatusBadGateway)
 			return
 		}
+		applyInjectHeaders(r, cfg.InjectHeaders)
 		proxy.ServeWithFailover(w, r, ranked, body, model, retry)
 		return
 	}
@@ -444,7 +446,15 @@ func (rt *Runtime) handleV1(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"no healthy backend"}}`, http.StatusBadGateway)
 		return
 	}
+	applyInjectHeaders(r, cfg.InjectHeaders)
 	proxy.Serve(w, r, st)
+}
+
+// applyInjectHeaders 把全局静态头写进上游请求（服务端配置覆盖客户端同名头）。
+func applyInjectHeaders(r *http.Request, ih map[string]string) {
+	for k, v := range ih {
+		r.Header.Set(k, v)
+	}
 }
 
 // handlePD PD 分离路由（M7）：
@@ -463,7 +473,8 @@ func (rt *Runtime) handlePD(w http.ResponseWriter, r *http.Request, cfg *Config,
 		return
 	}
 
-	for k, v := range cfg.PD.InjectHeaders {
+	applyInjectHeaders(r, cfg.InjectHeaders) // 全局静态头（PD 各路径统一注入）
+	for k, v := range cfg.PD.InjectHeaders { // PD 段静态头覆盖全局同名头
 		r.Header.Set(k, v)
 	}
 

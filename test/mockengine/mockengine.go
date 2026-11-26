@@ -43,6 +43,7 @@ type Engine struct {
 
 	requests atomic.Int64
 	lastBody atomic.Value // string，最后一次 chat 请求体（调试/断言用）
+	lastHdr  atomic.Value // map[string]string，最后一次 chat 请求头快照（断言注入头用）
 
 	extra atomic.Value // map[string]any，追加进 chat 200 响应的顶层字段
 }
@@ -81,6 +82,15 @@ func (e *Engine) Requests() int64 { return e.requests.Load() }
 func (e *Engine) LastBody() string {
 	s, _ := e.lastBody.Load().(string)
 	return s
+}
+
+// LastHeader 最近一次 chat 请求的单个头（不存在返回空串）。
+func (e *Engine) LastHeader(name string) string {
+	m, _ := e.lastHdr.Load().(map[string]string)
+	if m == nil {
+		return ""
+	}
+	return m[name]
 }
 
 // SetStatusSeq 运行中重置状态码序列（重试/熔断场景用）。
@@ -125,6 +135,13 @@ func (e *Engine) handleChat(w http.ResponseWriter, r *http.Request) {
 	e.requests.Add(1)
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 	e.lastBody.Store(string(body))
+	snap := map[string]string{}
+	for k, vs := range r.Header {
+		if len(vs) > 0 {
+			snap[k] = vs[0]
+		}
+	}
+	e.lastHdr.Store(snap)
 
 	if e.latency > 0 {
 		time.Sleep(e.latency)
