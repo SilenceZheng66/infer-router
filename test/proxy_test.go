@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"infer-router/internal/registry"
 	"infer-router/internal/proxy"
+	"infer-router/internal/registry"
 )
 
 // upstream 模拟 OpenAI 兼容流式后端。

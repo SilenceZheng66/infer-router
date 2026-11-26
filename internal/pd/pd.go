@@ -48,11 +48,11 @@ const DefaultSglangBootstrapPort = 8998
 
 // Cfg pd: 配置段（mode 为空 = PD 关闭，全部后端按普通池路由）。
 type Cfg struct {
-	Mode         string            `yaml:"mode" json:"mode"`                                 // "" | sglang | vllm
-	ThresholdTok int               `yaml:"path_threshold_prompt_tokens" json:"path_threshold_prompt_tokens"` // inline/分离路径的 token 阈值
-	BootstrapPort int              `yaml:"default_bootstrap_port" json:"default_bootstrap_port"`             // decode 未配置 bootstrap_port 时的兜底端口
-	RemoteTPSize int               `yaml:"remote_tp_size" json:"remote_tp_size"`             // vllm 模式 remote_tp_size 兜底（1）
-	InjectHeaders map[string]string `yaml:"inject_headers" json:"inject_headers"`             // 分离请求额外注入的静态头
+	Mode          string            `yaml:"mode" json:"mode"`                                                 // "" | sglang | vllm
+	ThresholdTok  int               `yaml:"path_threshold_prompt_tokens" json:"path_threshold_prompt_tokens"` // inline/分离路径的 token 阈值
+	BootstrapPort int               `yaml:"default_bootstrap_port" json:"default_bootstrap_port"`             // decode 未配置 bootstrap_port 时的兜底端口
+	RemoteTPSize  int               `yaml:"remote_tp_size" json:"remote_tp_size"`                             // vllm 模式 remote_tp_size 兜底（1）
+	InjectHeaders map[string]string `yaml:"inject_headers" json:"inject_headers"`                             // 分离请求额外注入的静态头
 }
 
 // Bootstrap sglang 模式注入 prefill 请求体的三元组。
@@ -134,12 +134,12 @@ func BuildVllmPrefillBody(body []byte, remoteHost string, remotePort, remoteTP i
 		"max_tokens": 1,
 		"stream":     false,
 		"kv_transfer_params": map[string]any{
-			"do_remote_decode": true,
+			"do_remote_decode":  true,
 			"do_remote_prefill": false,
-			"remote_engine_id": nil,
-			"remote_host":      remoteHost,
-			"remote_port":      remotePort,
-			"remote_tp_size":   remoteTP,
+			"remote_engine_id":  nil,
+			"remote_host":       remoteHost,
+			"remote_port":       remotePort,
+			"remote_tp_size":    remoteTP,
 		},
 	})
 }

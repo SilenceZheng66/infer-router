@@ -103,8 +103,8 @@ func buildTreeRouter(t *testing.T, treeCfg app.TreeCfg) (string, *app.Runtime, [
 
 // TestMessageChainPrefixStability：多轮追加是严格前缀延伸；局部改写只作废所在块。
 func TestMessageChainPrefixStability(t *testing.T) {
-	sys := strings.Repeat("共享系统提示词。", 45)           // 315 rune → 2 块
-	u1 := strings.Repeat("第一轮用户输入的内容。", 20)      // 220 rune → 1 块
+	sys := strings.Repeat("共享系统提示词。", 45)       // 315 rune → 2 块
+	u1 := strings.Repeat("第一轮用户输入的内容。", 20)     // 220 rune → 1 块
 	u2 := strings.Repeat("第二轮用户输入的内容更长一些。", 12) // 1 块
 
 	turn1 := affinity.MessageChain([]byte(convTurn("m", sys, []string{u1}, 1)), 0)

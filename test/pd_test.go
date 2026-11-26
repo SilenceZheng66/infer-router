@@ -201,8 +201,8 @@ func TestPDVllmTwoPhase(t *testing.T) {
 
 	// 阶段1断言：prefill 收到 max_tokens=1 + do_remote_decode
 	var phase1 struct {
-		MaxTokens        int           `json:"max_tokens"`
-		Stream           bool          `json:"stream"`
+		MaxTokens        int            `json:"max_tokens"`
+		Stream           bool           `json:"stream"`
 		KVTransferParams map[string]any `json:"kv_transfer_params"`
 	}
 	if err := json.Unmarshal([]byte(engines[0].LastBody()), &phase1); err != nil {

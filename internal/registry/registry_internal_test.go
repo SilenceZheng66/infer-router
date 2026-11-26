@@ -12,10 +12,10 @@ engine_inner_queue_depth{engine="0"} 2
 unrelated_metric 9.9
 `
 	cases := []struct {
-		name  string
+		name   string
 		metric string
-		want  float64
-		ok    bool
+		want   float64
+		ok     bool
 	}{
 		{"short name matches prefixed line", "gpu_cache_usage_perc", 0.873, true},
 		{"prefixed name exact match", "vllm:gpu_cache_usage_perc", 0.873, true},
