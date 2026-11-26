@@ -19,16 +19,16 @@ pinned: false
 
 ```bash
 BASE=https://<your-space>.modelscope.cn
-curl $BASE/healthz
+curl "$BASE/statusz"; curl "$BASE/readyz"
 curl $BASE/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "model": "Qwen/Qwen3.5-27B",
   "messages": [{"role":"user","content":"你好"}]
 }'
 ```
 
 ## 配置
 
-- `config.yaml`：上游 `api-inference.modelscope.cn`，模型 `Qwen/Qwen2.5-7B-Instruct`（可在 Space 仓库内直接修改）。
+- `config.yaml`：上游 `api-inference.modelscope.cn`，模型 `Qwen/Qwen3.5-27B`（可在 Space 仓库内直接修改）。
 - Token：Space 的 **Secrets** 中配置 `MODELSCOPE_API_TOKEN`，`entrypoint.sh` 启动时注入配置，
   凭证不落仓库、不出镜像构建缓存。
 

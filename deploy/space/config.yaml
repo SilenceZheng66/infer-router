@@ -13,5 +13,5 @@ inject_headers:
 backends:
   - name: modelscope-api
     base_url: https://api-inference.modelscope.cn
-    model: Qwen/Qwen2.5-7B-Instruct
+    model: Qwen/Qwen3.5-27B
     weight: 1
