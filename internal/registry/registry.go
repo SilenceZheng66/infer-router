@@ -102,12 +102,14 @@ type Registry struct {
 	mu       sync.RWMutex
 	states   []*State
 	client   *http.Client
-	kvMetric string // 副本 /metrics 中的 KV 使用率指标名（vLLM: gpu_cache_usage_perc）
+	kvClient *http.Client // KV 抓取独立长超时：vLLM 0.9 池满时 /metrics 响应可 >3s，共用短超时会冻结旧水位
+	kvMetric string       // 副本 /metrics 中的 KV 使用率指标名（vLLM: gpu_cache_usage_perc）
 }
 
 func New(backends []Backend, threshold int, cooldown time.Duration) *Registry {
 	r := &Registry{
 		client:   &http.Client{Timeout: 3 * time.Second},
+		kvClient: &http.Client{Timeout: 10 * time.Second},
 		kvMetric: "gpu_cache_usage_perc",
 	}
 	for _, b := range backends {
@@ -165,7 +167,7 @@ func (r *Registry) ProbeAll(ctx context.Context) {
 		}
 		s.SetHealthy(ok)
 
-		fetchKV(ctx, r.client, s, kvMetric)
+		fetchKV(ctx, r.kvClient, s, kvMetric)
 	}
 }
 

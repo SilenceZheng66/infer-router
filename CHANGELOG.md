@@ -1,5 +1,19 @@
 # Changelog
 
+## [v0.2.1] — 2026-11-26
+
+vLLM 0.9.x 真实引擎验证收口：一处实质修复 + 文档与真值对齐。
+
+### 修复
+- **KV 水位抓取独立超时**（`internal/registry`）：探活与 KV 抓取原先共用 3s `http.Client`；vLLM 0.9.x 在 KV 池高水位时 `/metrics` 响应延迟增大，导致水位抓取超时失败、`router_backend_kv_util` 冻结旧值。现拆分独立 `kvClient`（10s 超时），探活节奏不受影响。
+
+### 变更
+- M5 KV gauge 说明按 vLLM 0.9.2 真实 `/metrics` 修正：指标名为 `vllm:gpu_cache_usage_perc` / `vllm:kv_cache_usage_perc`（带命名空间前缀与 `engine`/`model_name` 标签，两值恒同，gpu 版标 DEPRECATED 指向 kv 版），`kv.metric_name` 冒号后缀匹配实测兼容。
+
+### 文档
+- `docs/comparison.md` §4 KV 水位局限改写：真实引擎（A10×vLLM 0.9.2）KV pool 约 127K tokens，灌至 0.9 水位需同时驻留约 114K tokens，属正常负载难以自然触达的量级——如实标注。
+- `docs/usage.md` §5.4 S4 门禁 gauge 说明同步修正。
+
 ## [Unreleased] — v0.3.0（PD 分离网关层）
 
 ### 新增

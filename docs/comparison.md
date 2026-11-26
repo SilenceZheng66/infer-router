@@ -42,7 +42,7 @@
 - **gRPC 不支持**：仅 HTTP（OpenAI 兼容 `/v1/*`）。
 - **亲和仅覆盖 chat 语义**：`/v1/*` 全部透传，但会话/前缀亲和仅对 chat completions 生效（completions/embeddings 等按 rendezvous 均衡，不做前缀匹配）。
 - **前缀树为近似匹配**：分块哈希链精度低于逐 token 树；以多路由器水平扩展时的命中率一致性换回状态复杂度。
-- **KV 水位依赖引擎指标**：M5 分流需要引擎 /metrics 暴露真实 GPU KV 块水位 gauge。vLLM 0.8/0.9 的 `gpu_cache_usage_perc` 可用；0.10.x 及以上的 `kv_cache_usage_perc` 仅统计外部 KV connector（恒 0.0），本仓 GPU 实测无法在该构建上触发分流（mock 集成测试全绿，`kv.metric_name` 的命名空间前缀兼容在真实 /metrics 验证通过）。
+- **KV 水位依赖引擎指标**：M5 分流需要引擎 /metrics 暴露真实 GPU KV 块水位 gauge。vLLM 0.9.x 实测可用（指标名为 `vllm:gpu_cache_usage_perc` / `vllm:kv_cache_usage_perc`，带命名空间前缀与 engine/model_name 标签，两值恒同、gpu 版标 DEPRECATED 指向 kv 版）；0.10.x 及以上的 `kv_cache_usage_perc` 仅统计外部 KV connector（恒 0.0）。真实引擎上一次可观测的 KV pool 约 127K tokens（A10, util 0.30），将水位灌至 0.9 需同时驻留约 114K tokens——mock 集成测试全绿，`kv.metric_name` 的冒号后缀匹配对带前缀指标名实测兼容。
 - **SGLang KV 指标名需手工对齐**：`kv.metric_name` 可配，SGLang 侧指标名未在本仓 GPU 环境实测。
 
 ## 5. 实测数据

@@ -137,7 +137,7 @@ python tools/load_test.py http://127.0.0.1:8080 degraded 10 3 5 e1 0.2
 | S1 标准负载门禁 | 40×6 递增对话，先同步后 jitter | sticky≥0.95；vLLM `prefix_cache` 计数差值命中率≥67.3% |
 | S2 双模型混池零串池 | 副本 B 声明 base+LoRA 双模型（自动探测 adapter），20 发跨池请求 | 请求全部落 B、A 增量=0、`router_model_mismatch_total` 不增；未声明模型→502 |
 | S3 压测中途 kill 副本 | 压测进行到 t+20s 时 TERM 副本 B | 客户端 0 失败（请求级 failover），重试计数如实记录 |
-| S4 异构 KV 分流 | 直灌副本 A 至 KV 水位 ≥0.9（`kv.metric_name` 指定的 gauge），再发长前缀会话 | `router_kv_steered_total≥1`，改派目标增量 > 被灌副本；**要求引擎暴露真实 GPU 块水位 gauge**（vLLM 0.8/0.9 为 `gpu_cache_usage_perc`；0.10.x 的 `kv_cache_usage_perc` 仅统计外部 KV connector、恒 0，不可用——指标名自动兼容命名空间前缀） |
+| S4 异构 KV 分流 | 直灌副本 A 至 KV 水位 ≥0.9（`kv.metric_name` 指定的 gauge），再发长前缀会话 | `router_kv_steered_total≥1`，改派目标增量 > 被灌副本；**要求引擎暴露真实 GPU 块水位 gauge**（vLLM 0.9.x 实测为 `vllm:gpu_cache_usage_perc` / `vllm:kv_cache_usage_perc`，带命名空间前缀，metric_name 冒号后缀匹配自动兼容；0.10.x 的 `kv_cache_usage_perc` 仅统计外部 KV connector、恒 0，不可用） |
 | S5 运行中扩缩副本 | 管理 API add/remove + SIGHUP 热更 | backends/healthy 数值即时变化且路由进程 PID 不变 |
 
 ```bash
