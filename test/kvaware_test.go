@@ -187,7 +187,7 @@ func TestKVTreeHitSteering(t *testing.T) {
 // TestKVCapScale：cap 按 KV 余量缩放（可选开关）——高水位副本的并发承载被压缩，
 // 并发突发下大部分流量被 bounded load 顺延到低水位副本。
 func TestKVCapScale(t *testing.T) {
-	engA := mockengine.New(mockengine.Options{Name: "eng-a", Models: []string{"m-1"}, LatencyMs: 200})
+	engA := mockengine.New(mockengine.Options{Name: "eng-a", Models: []string{"m-1"}, LatencyMs: 800})
 	engB := mockengine.New(mockengine.Options{Name: "eng-b", Models: []string{"m-1"}})
 	url, rt, _ := buildKVRouter(t, app.KVCfg{CapScale: boolPtr(true)}, engA, engB)
 
