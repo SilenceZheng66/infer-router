@@ -77,7 +77,7 @@ type Config struct {
 	Addr              string             `yaml:"addr"`
 	Strategy          string             `yaml:"strategy"`
 	HealthIntervalSec int                `yaml:"health_interval_s"`
-	AdminToken        string             `yaml:"admin_token"` // 管理接口令牌；留空 = 仅允许 localhost 调用
+	AdminToken        string             `yaml:"admin_token"`                          // 管理接口令牌；留空 = 仅允许 localhost 调用
 	InjectHeaders     map[string]string  `yaml:"inject_headers" json:"inject_headers"` // 全局静态头注入（所有经路由的上游请求；服务端配置覆盖客户端同名头）
 	Breaker           BreakerCfg         `yaml:"breaker"`
 	Affinity          AffinityCfg        `yaml:"affinity"`
