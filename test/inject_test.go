@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"infer-router/internal/app"
 	"infer-router/internal/registry"
