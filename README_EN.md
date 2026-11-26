@@ -26,6 +26,7 @@ infer-router does one thing: **route OpenAI-compatible requests (including SSE s
 - **Probes & HA**: `/readyz` returns 503 when every replica is evicted (readiness), `/statusz` stays 200 (liveness); the router is stateless — run multiple instances behind an LB to scale out
 - **Observability**: `/metrics` (Prometheus: per-backend requests, sticky ratio, overflow fallbacks, retries, model-routing rejects/mismatches), `/statusz` (health snapshot)
 - **SSE pass-through**: `FlushInterval=-1` streams chunks through without buffering
+- **PD disaggregated routing (experimental)**: a Prefill/Decode split gateway layer — short requests go inline to the D pool, long requests (estimated prompt tokens ≥ threshold) take a (P,D) disaggregated path; sglang mode injects the `bootstrap_host/port/room` triplet into the body (engine-native KV transfer, room IDs are salted and atomically unique); vllm mode is a two-phase orchestration (prefill sends `max_tokens=1` + `kv_transfer_params{do_remote_decode}`, then the returned KV params re-target the decode pool with streaming write-back); P-pool failover, per-pool probing/breaking, dual-pool `readyz` semantics, and 4 PD-specific metrics
 
 ## Benchmark (2× vLLM Qwen2.5-1.5B replicas, A10 24GB)
 
@@ -126,6 +127,22 @@ backends:
 ```
 
 Deployment notes: run the router in the same host/zone as the replicas (probes stay on the internal network); host the static binary or image via systemd/Kubernetes (~1 vCPU / 64MB); let Prometheus scrape `:8080/metrics` and watch `router_affinity_sticky_ratio` (<0.9 → check the session-key contract) and sustained growth of `router_affinity_overload_fallback_total` (raise alpha or add replicas); have clients consistently send `X-Session-Id`.
+
+## PD disaggregated routing (M7, experimental)
+
+Prefill (compute-bound) and decode (bandwidth/capacity-bound) have different resource profiles, and production stacks (SGLang SMG, vLLM Production Stack, llm-d) commonly split the two phases onto separate replica pools. infer-router plugs in as a **gateway layer**: clients still see a single OpenAI-compatible endpoint, and the router decides per request between inline delivery and disaggregated orchestration.
+
+**How it works** (with `pd.mode` unset the whole layer is off and every backend routes as a normal pool — v0.2 configs need zero changes):
+
+- When PD is enabled, backends must declare `role: prefill | decode` with ≥1 replica per pool; prefix trees are namespaced by `model#role` so the P and D pools never pollute each other.
+- **Path decision**: prompt tokens are estimated as chars/4 (falls back to body/3 if chat parsing fails). Below `pd.path_threshold_prompt_tokens` (default 256) → inline to the D pool (prefill is pure extra latency for short requests); at/above → pick a (P,D) pair.
+- **sglang mode**: injects `bootstrap_host / bootstrap_port / bootstrap_room` into the prefill request body (native fields on SGLang's `ChatCompletionRequest`, verified against main); room = random salt + atomic counter, never reused; the router performs request-level failover on the P pool (re-injecting a fresh room per retry). Decode replicas run `--disaggregation-bootstrap-port` (default 8998).
+- **vllm mode**: two-phase orchestration — phase 1 sends the P pool `max_tokens=1`, `stream=false`, `kv_transfer_params{do_remote_decode:true, remote_host/port/tp_size→decode}` and reads the returned KV params; phase 2 re-sends the original body plus those params to the D pool and streams the answer back to the client (KV lands on exactly one replica, so phase 2 does not fail over across decode replicas).
+- **Health & observability**: independent probing/breaking per pool; `/readyz` requires ≥1 healthy replica in each pool; new metrics `router_pd_path_total{path}`, `router_pd_pair_total{prefill,decode}`, `router_pd_bootstrap_total{result}`, `router_pool_kv_util{backend,role}`.
+
+See the PD section of [`config/router.yaml`](config/router.yaml) for a full example (SGLang 1P + 2D).
+
+> **Status**: the full PD path (inline delivery / sglang bootstrap injection & failover / vllm two-phase orchestration / dual-pool readyz / config validation rollback) is covered by the `test/pd_test.go` mock integration suite; A10 GPU results (SGLang 0.5.x 1P+1D bootstrap-422 alignment, vLLM 0.9 end-to-end KV transfer) ship with v0.3.0.
 
 ## Load-test tools
 

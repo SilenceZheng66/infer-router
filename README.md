@@ -26,6 +26,7 @@ infer-router 只做一件事：**把 OpenAI 兼容请求（含 SSE 流式）以�
 - **探针与 HA**：`/readyz` 全副本摘除时 503（readiness），`/statusz` 恒 200（liveness）；路由器无状态，多实例 + 上层 LB 即水平扩展
 - **可观测**：`/metrics`（Prometheus：per-backend 请求计数、粘性率、fallback 计数、重试计数、模型路由拒绝/不符）、`/statusz`（健康快照）
 - **SSE 原样透传**：`FlushInterval=-1` 逐块转发，不缓冲流式响应
+- **PD 分离路由（实验性）**：Prefill/Decode 分离网关层——短请求 inline 直连 D 池，长请求（估算 prompt token ≥ 阈值）走 (P,D) 分离路径；sglang 模式 body 注入 `bootstrap_host/port/room` 三元组（引擎原生 KV 传输，房间号原子递增唯一）；vllm 模式两段编排（prefill 发 `max_tokens=1` + `kv_transfer_params{do_remote_decode}`，取回 KV 参数后改发 decode 池流式回写）；P 池 failover、双池独立探活熔断、`readyz` 双池就绪语义与 4 个 PD 专属指标
 
 ## 实测数据（双副本 vLLM 2.5-1.5B，A10 24GB）
 
@@ -126,6 +127,22 @@ backends:
 ```
 
 部署要点：路由层与副本同机/同可用区部署（探活走内网）；systemd 或 Kubernetes 以静态二进制/镜像托管，资源占用约 1 vCPU / 64MB；Prometheus 抓取 `:8080/metrics` 监控 `router_affinity_sticky_ratio`（<0.9 检查会话 key 约定）与 `router_affinity_overload_fallback_total` 持续增长（调大 alpha 或扩容）；客户端统一携带 `X-Session-Id`。
+
+## PD 分离路由（M7，实验性）
+
+大模型推理的 prefill（算力密集）与 decode（带宽/容量密集）资源画像不同，生产栈（SGLang SMG、vLLM Production Stack、llm-d）普遍把两阶段拆到不同副本池。infer-router 以**网关层**身份接入这一形态：客户端仍只见一个 OpenAI 兼容端点，路由层按请求长度决定 inline 直连或分离编排。
+
+**工作方式**（`pd.mode` 为空时整层关闭，全部后端按普通池路由，v0.2 配置零改动）：
+
+- 启用 PD 后 backends 须声明 `role: prefill | decode`，两池各 ≥1 副本；按 `model#role` 命名空间隔离，P/D 池的前缀树互不污染。
+- **路径决策**：按字符数/4 粗估 prompt token（chat 结构解析失败退化为 body/3）。低于 `pd.path_threshold_prompt_tokens`（默认 256）→ inline 直连 D 池（prefill 对短请求是额外一跳延迟）；≥ 阈值 → 选 (P,D) 对走分离路径。
+- **sglang 模式**：向 prefill 请求 body 注入 `bootstrap_host / bootstrap_port / bootstrap_room`（房间号 = 随机盐 + 原子计数，永不复用），SGLang 引擎经 bootstrap 端口完成 KV 传输（decode 副本需 `--disaggregation-bootstrap-port`，默认 8998）；路由层对 P 池做请求级 failover（重试前重新注入新 room）。
+- **vllm 模式**：两段编排——阶段 1 向 P 池发 `max_tokens=1`、`stream=false`、`kv_transfer_params{do_remote_decode:true, remote_host/port/tp_size→decode}`，从响应取回 KV 参数；阶段 2 以原始 body + 引擎返回的参数改发 D 池，流式回写客户端（KV 只落一地，阶段 2 不做跨副本 failover）。
+- **健康与观测**：P/D 池独立探活与熔断；`/readyz` 要求两池各 ≥1 健康；新增指标 `router_pd_path_total{path}`、`router_pd_pair_total{prefill,decode}`、`router_pd_bootstrap_total{result}`、`router_pool_kv_util{backend,role}`。
+
+配置示例（SGLang 1P + 2D）见 [`config/router.yaml`](config/router.yaml) 的 PD 分离段；字段语义与注入通道的引擎侧查证记录见设计文档。
+
+> **状态**：PD 全链路（inline 直连 / sglang bootstrap 注入与 failover / vllm 两段编排 / readyz 双池语义 / 配置校验回滚）已由 `test/pd_test.go` 全量 mock 集成测试覆盖；A10 GPU 实测（SGLang 0.5.x 1P+1D bootstrap 422 对齐、vLLM 0.9 KV 传输端到端）与门禁结果随 v0.3.0 发布补录。
 
 ## 压测工具
 

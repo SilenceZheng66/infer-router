@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased] — v0.3.0（PD 分离网关层）
+
+### 新增
+- **M7 PD 分离路由层**（`internal/pd`，+1035 行，9 文件）：`pd.mode: sglang | vllm` 两套分离编排——
+  - **sglang 模式**：body 注入 `bootstrap_host/port/room` 三元组（SGLang `ChatCompletionRequest` 原生字段，main 分支查证确认），房间号随机盐 + 原子计数保证唯一；prefill 请求级 failover（重试重新注入新 room）。
+  - **vllm 模式**：两段编排（prefill `max_tokens=1` + `kv_transfer_params{do_remote_decode}` → 取回 KV 参数改发 decode 流式回写）；阶段 2 不做跨副本 failover（KV 只落一地）。
+  - 路径决策：字符数/4 粗估 token（chat 解析失败退化 body/3），低于 `path_threshold_prompt_tokens`（默认 256）inline 直连 D 池。
+  - 池语义：backend 增加 `role / bootstrap_host / bootstrap_port` 字段；按 `model#role` 命名空间隔离前缀树；P/D 独立探活熔断；`readyz` 双池就绪、`statusz` 加 `pd_mode/prefill_healthy/decode_healthy`；配置校验失败回滚旧配置。
+  - 新指标：`router_pd_path_total`、`router_pd_pair_total`、`router_pd_bootstrap_total`、`router_pool_kv_util{role}`。
+- **测试**：`test/pd_test.go` 8 场景（inline 路径 / bootstrap 注入与 room 唯一性 / sglang prefill failover 2P+1D / vllm 两段编排参数断言 / vllm prefill failover / readyz 双池 / 配置校验）；mockengine 支持响应额外字段重编码。
+- `config/router.yaml` PD 配置段文档与 1P+2D 示例；README PD 章节。
+
+### 变更
+- 全仓库 gofmt 清零（6 文件格式对齐 + import 排序）。
+- `TestKVCapScale` 并发窗口收紧（eng-a 延迟 200→800ms），消除 pip 编译等 CPU 抢占下的非确定性失败。
+
+### 兼容性
+- v0.2 配置零改动可运行：`pd` 段缺省 = PD 关闭，单池形态完全不变。
+
 ## [v0.2.0] — 2026-11-22
 
 对标 SGLang SMG / llm-d 生产栈的完整迭代：模型感知路由、请求级重试、混合前缀树、动态发现与热加载、KV 容量感知路由，全部经 mock 单测与 A10×vLLM GPU 端到端回归。

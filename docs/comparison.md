@@ -25,7 +25,7 @@
 | 动态发现 | ✅ 热加载（SIGHUP/文件触发，原子换装 + 在途排空 + 失败回滚）+ `POST /admin/backends` + K8s ConfigMap-reloader 等价方案 | ✅ K8s service discovery（selector 轮询） | ✅ K8s API 原生 | M4；机制对齐、形态不同（configmap 渲染 vs API watch） |
 | KV 容量感知路由 | ✅ 探活顺带抓 `kv.metric_name`（缺省 `gpu_cache_usage_perc`，自动兼容 `vllm:` 命名空间前缀与标签行），top-k 高水位分流 + 可选按 KV 余量缩放负载上限（`router_backend_kv_util` / `router_kv_steered_total`） | ➖ 以容量/负载为中心的均衡，未见 KV 水位驱动的会话改派 | ➖ 侧重 KV 精确索引与卸载，路由侧以事件同步为主 | M5；mock 全链路验证；GPU 上受引擎指标缺口限制见 §4 |
 | KV 缓存共享/卸载 | ⛔ 不做缓存管理 —— 通过标准 API 串联 LMCache 等外置层获得同等收益 | ➖ 依赖引擎侧 | ✅ LMCache / NIXL | 架构取舍：路由层不接管 KV 生命周期 |
-| PD 分离（prefill/decode） | ⛔ 路由层不拆分池 —— 由引擎侧网关/调度承担，或上层按池分别部署 infer-router 串联 | ✅ 原生 | ✅ NIXL | M7（Stretch）：如实施则为透传双池路由；未实施前如实标注 |
+| PD 分离（prefill/decode） | ✅ **网关层分离编排（M7）**：短请求 inline 直连 D 池、长请求 (P,D) 分离（sglang bootstrap 注入 / vllm 两段 kv_transfer 编排），P 池 failover、双池独立探活熔断、`readyz` 双池就绪（`router_pd_path_total` 等指标）；不做 KV 生命周期管理，传输由引擎原生通道完成 | ✅ 原生（sgl-router 调度 + 引擎 KV 传输） | ✅ NIXL | M7 代码与 mock 全量测试已落地；GPU 实测随 v0.3.0 补录。与 SMG 的差异：SMG 的 sgl-router 与引擎同栈深度集成（含 KV 事件同步），infer-router 是引擎中立的外挂编排层——两引擎协议各写一套适配，换取不绑定单一引擎 |
 | 服务发现语义 | ✅ admin API 即时增删 + 热更 + K8s 等价脚本 | ✅ | ✅ | M4 |
 | 可观测性 | ✅ Prometheus 全量指标（粘性率、分配分布、重试、熔断、树规模、KV 水位） | ✅ | ✅ | 各家口径不同，见 usage.md §指标 |
 
